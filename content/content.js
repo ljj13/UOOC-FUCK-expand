@@ -1493,16 +1493,19 @@ if (window.self === window.top) { // 防 iframe 多次注入，只在顶层运�
   }
 
   // ==================== 9.9 讨论区：AI 生成回复并自动发帖 ====================
-  // 思路取自 fastuooc 的讨论实现：hash 路由识别讨论视图，页面世界（MAIN world）
-  // 里攀爬 Angular scope 取帖子标题/正文、填充 DIR_EDITORS/textarea，
-  // 经 courseService.discReply 提交。已回过的帖子持久化去重，回完自动回学习视图。
+
+  // 🔍 网络追踪（诊断用）：句柄由 background 以 world:MAIN 注入到所有 frame
+  //（见 background uoocNetHook），记录讨论相关请求，探针 debug.net 里会回传。
+  // 用途：把真实接口 URL/字段打出来；若页面世界注入受限，后续可据此改纯 fetch 直发。
 
   // content script 在隔离世界访问不到页面 angular/DIR_EDITORS，
-  // 通过 background 的 chrome.scripting(world:'MAIN') 在页面世界执行函数（不受页面 CSP 限制）。
-  function pageEval(fn, args) {
+  // 通过 background 的 chrome.scripting(world:'MAIN') 在页面世界执行。
+  // ⚠️ 注入函数定义在 background（传函数引用，不能用 toString+eval——MV3 CSP 禁 unsafe-eval）。
+  // fn 只传函数名：'probe' | 'submit'。
+  function pageEval(name, args) {
     return new Promise((resolve) => {
       try {
-        chrome.runtime.sendMessage({ type: 'PAGE_EVAL', fn: fn.toString(), args: args || [] })
+        chrome.runtime.sendMessage({ type: 'PAGE_EVAL', fn: name, args: args || [] })
           .then((r) => resolve(r && 'result' in r ? r.result : null))
           .catch(() => resolve(null));
       } catch (e) {
@@ -1511,131 +1514,9 @@ if (window.self === window.top) { // 防 iframe 多次注入，只在顶层运�
     });
   }
 
-  // 在页面世界执行：探测讨论列表 + 帖子详情（标题/正文已剥 HTML）
-  function pgProbe() {
-    function climb(scope, pred) {
-      let cur = scope;
-      for (let i = 0; cur && i < 12; i++) {
-        try { if (pred(cur)) return cur; } catch (e) { /* 忽略 */ }
-        cur = cur.$parent;
-      }
-      return null;
-    }
-    function strip(html, cap) {
-      const d = document.createElement('div');
-      d.innerHTML = String(html || '');
-      d.querySelectorAll('br').forEach((n) => n.replaceWith(document.createTextNode('\n')));
-      const t = (d.textContent || '').replace(/[ \t]+/g, ' ').replace(/\n{3,}/g, '\n\n').trim();
-      return t.slice(0, cap);
-    }
-    const out = { hasAngular: !!window.angular };
-    try {
-      // 结构诊断信息：探针未命中时输出，便于定位站点结构差异
-      out.debug = {
-        ngRepeats: Array.from(document.querySelectorAll('[ng-repeat]'))
-          .slice(0, 12).map((n) => String(n.getAttribute('ng-repeat')).slice(0, 40)),
-        hasDiscuz: !!document.querySelector('.Discuz')
-      };
-      if (window.angular) {
-        const lnodes = document.querySelectorAll(
-          '[ng-repeat*="chapter_tiezi in questionList[2]"],[ng-repeat*="tiezi in studentList[0]"],[ng-repeat*="tiezi in comList"],[uooc-pager],.Discuz');
-        for (const n of lnodes) {
-          const s = climb(window.angular.element(n).scope(), (c) =>
-            (typeof c.getPageDiscussion === 'function' && c.questionListPaper) ||
-            (typeof c.getCourseDiscussionList === 'function' && c.noteListPaper));
-          if (s) {
-            const list = Array.isArray(s.studentList && s.studentList[0]) ? s.studentList[0]
-              : Array.isArray(s.comList) ? s.comList
-              : Array.isArray(s.questionList && s.questionList[2]) ? s.questionList[2] : [];
-            const listEls = document.querySelectorAll('[ng-repeat*="tiezi"], .discussion-item, .thread-item');
-            out.list = list.map((it, i) => {
-              const tid = String(it.tid || it.thread_id || it.topic_id || it.id || '');
-              const el = listEls[i];
-              if (el && tid) { try { el.setAttribute('data-uooc-tid', tid); } catch (e) { /* 忽略 */ } }
-              return { tid, title: strip(it.subject || it.title || it.content || '', 100) };
-            }).filter((x) => x.tid);
-            const pages = (s.noteListPaper && (s.noteListPaper.total || s.noteListPaper.pages))
-              || (s.questionListPaper && s.questionListPaper[2] && (s.questionListPaper[2].pageCount || s.questionListPaper[2].pages)) || 1;
-            out.pages = Number(pages) || 1;
-            break;
-          }
-        }
-        const dnodes = document.querySelectorAll(
-          '[thread-detail],[ng-bind-html*="threads.content"],.discussionDesc,.thesis-content,.discuss-header');
-        for (const n of dnodes) {
-          const s = climb(window.angular.element(n).scope(), (c) =>
-            c.threads && (typeof c.replay === 'function' || typeof c.getList === 'function' || typeof c.handleRelease === 'function'));
-          if (s) {
-            const t = s.threads || {};
-            out.detail = {
-              tid: String(t.tid || t.id || ''),
-              title: strip(t.subject || t.title || '', 150),
-              content: strip(t.content || (n.innerText || ''), 1500)
-            };
-            break;
-          }
-        }
-      }
-    } catch (e) { out.err = String(e); }
-    return out;
-  }
-
-  // 在页面世界执行：填充编辑器并经 courseService.discReply 发帖
-  function pgSubmitReply(cid, tid, content) {
-    function climb(scope, pred) {
-      let cur = scope;
-      for (let i = 0; cur && i < 12; i++) {
-        try { if (pred(cur)) return cur; } catch (e) { /* 忽略 */ }
-        cur = cur.$parent;
-      }
-      return null;
-    }
-    if (!window.angular) return Promise.resolve({ __err: '页面 Angular 不可用' });
-    let detail = null;
-    const nodes = document.querySelectorAll(
-      '[thread-detail],[ng-bind-html*="threads.content"],.discussionDesc,.thesis-content,.discuss-header');
-    for (const n of nodes) {
-      const s = climb(window.angular.element(n).scope(), (c) =>
-        c.threads && (typeof c.replay === 'function' || typeof c.getList === 'function' || typeof c.handleRelease === 'function'));
-      if (s) { detail = s; break; }
-    }
-    if (!detail) return Promise.resolve({ __err: '未找到帖子详情 scope' });
-
-    // 编辑器填充：DIR_EDITORS（富文本）+ scope.noteContent + textarea 双保险
-    const editor = window.DIR_EDITORS && (window.DIR_EDITORS.noteEditorAll || window.DIR_EDITORS.noteEditor);
-    if (editor && typeof editor.setContent === 'function') {
-      try { editor.setContent(content); } catch (e) { /* 忽略 */ }
-    }
-    if ('noteContent' in detail) detail.noteContent = content;
-    document.querySelectorAll('textarea[ng-model="content"], textarea[ng-model="noteContent"]').forEach((ta) => {
-      const set = Object.getOwnPropertyDescriptor(window.HTMLTextAreaElement.prototype, 'value');
-      if (set && set.set) set.set.call(ta, content); else ta.value = content;
-      try {
-        const es = window.angular.element(ta).scope();
-        if (es && 'content' in es) { es.content = content; if (es.$evalAsync) es.$evalAsync(); }
-        if (es && 'noteContent' in es) { es.noteContent = content; if (es.$evalAsync) es.$evalAsync(); }
-      } catch (e) { /* 忽略 */ }
-      ta.dispatchEvent(new Event('input', { bubbles: true }));
-      ta.dispatchEvent(new Event('change', { bubbles: true }));
-    });
-
-    let injector = null;
-    try { injector = window.angular.element(document.body || document.documentElement).injector(); } catch (e) { /* 忽略 */ }
-    const courseService = injector && injector.get('courseService');
-    if (!courseService || typeof courseService.discReply !== 'function') {
-      return Promise.resolve({ __err: '未找到 courseService.discReply' });
-    }
-    return Promise.resolve(courseService.discReply({ cid: String(cid), tid: String(tid), content, images: null }))
-      .then(() => {
-        // 触发详情刷新，让站点状态机同步
-        try {
-          if (typeof detail.getList === 'function') detail.getList();
-          else if (typeof detail.getDetail === 'function') detail.getDetail();
-        } catch (e) { /* 忽略 */ }
-        return { ok: true };
-      })
-      .catch((e) => ({ __err: 'discReply 失败: ' + String(e) }));
-  }
+  // 页面世界函数（pgProbe / pgSubmitReply）已移至 background/background.js，
+  // 通过 chrome.scripting world:MAIN 以函数引用方式注入（MV3 CSP 禁 unsafe-eval）。
+  // 这里只通过 pageEval('probe'|'submit', args) 调用。
 
   // 讨论路由（hash 解析，无需页面世界）
   function discussionRoute() {
@@ -1669,24 +1550,41 @@ if (window.self === window.top) { // 防 iframe 多次注入，只在顶层运�
     location.hash = mode === 'old' ? '#/discusscom' : '#/discuss';
   }
   function navDiscussionDetail(route, tid) {
-    // 学习页内嵌讨论没有 hash 路由：直接点击列表项进入详情
-    const el = document.querySelector('[data-uooc-tid="' + tid + '"]');
+    // 学习页内嵌讨论没有 hash 路由：直接点击列表项进入详情。
+    // 讨论可能渲染在同源 iframe 中，主文档找不到时逐 frame 查找。
+    const sel = '[data-uooc-tid="' + tid + '"]';
+    let el = null;
+    try { el = document.querySelector(sel); } catch (e) { /* 忽略 */ }
+    if (!el) {
+      for (const fr of Array.from(document.querySelectorAll('iframe'))) {
+        try {
+          el = fr.contentDocument && fr.contentDocument.querySelector(sel);
+          if (el) break;
+        } catch (e) { /* 跨域 iframe 跳过 */ }
+      }
+    }
     if (el) { try { el.click(); return; } catch (e) { /* 落到 hash 导航 */ } }
     location.hash = route.mode === 'old'
       ? '#/discussdetail/com/' + encodeURIComponent(tid)
       : '#/discuss/' + encodeURIComponent(tid) + '/' + encodeURIComponent(route.cid) + '/discussDetail';
   }
-  // 学习页内嵌详情回列表：尝试常见返回/关闭入口
+  // 学习页内嵌详情回列表：尝试常见返回/关闭入口（含同源 iframe）
   function dismissDiscussionDetail() {
     const sels = ['.discuss-back', '.back-btn', '.btn-back', '.discuss-header .back',
       '[ng-click*="back"]', '[ng-click*="Back"]', '.layui-layer-close'];
-    for (const s of sels) {
-      const el = document.querySelector(s);
-      if (el && el.offsetHeight > 0) { try { el.click(); return true; } catch (e) { /* 继续 */ } }
+    const docs = [document];
+    for (const fr of Array.from(document.querySelectorAll('iframe'))) {
+      try { if (fr.contentDocument) docs.push(fr.contentDocument); } catch (e) { /* 忽略 */ }
     }
-    const backBtn = Array.from(document.querySelectorAll('a, button, span'))
-      .find((e) => /^(返回|返 回)$/.test((e.innerText || '').trim()) && e.offsetHeight > 0);
-    if (backBtn) { try { backBtn.click(); return true; } catch (e) { /* 忽略 */ } }
+    for (const d of docs) {
+      for (const s of sels) {
+        const el = d.querySelector(s);
+        if (el && el.offsetHeight > 0) { try { el.click(); return true; } catch (e) { /* 继续 */ } }
+      }
+      const backBtn = Array.from(d.querySelectorAll('a, button, span'))
+        .find((e) => /^(返回|返 回)$/.test((e.innerText || '').trim()) && e.offsetHeight > 0);
+      if (backBtn) { try { backBtn.click(); return true; } catch (e) { /* 忽略 */ } }
+    }
     return false;
   }
 
@@ -1751,7 +1649,7 @@ if (window.self === window.top) { // 防 iframe 多次注入，只在顶层运�
 
     discState.busy = true;
     try {
-      const probe = await pageEval(pgProbe);
+      const probe = await pageEval('probe');
       if (!probe || probe.__err) throw new Error((probe && probe.__err) || '页面探针失败');
       const replied = discRepliedGet();
 
@@ -1767,7 +1665,7 @@ if (window.self === window.top) { // 防 iframe 多次注入，只在顶层运�
         log(`💬 正在回复帖子：${(title || tid).slice(0, 24)}`);
         const reply = await genDiscussionReply(title, content);
         if (!reply) throw new Error('LLM 未返回回复内容');
-        const res = await pageEval(pgSubmitReply, [route.cid || '', tid, reply]);
+        const res = await pageEval('submit', [route.cid || '', tid, reply]);
         if (!res || res.__err) throw new Error((res && res.__err) || '发帖失败');
         discRepliedAdd(tid);
         discState.tried.add(tid);
@@ -1798,7 +1696,17 @@ if (window.self === window.top) { // 防 iframe 多次注入，只在顶层运�
       if (!discState.notedProbe) {
         discState.notedProbe = true;
         const ng = (probe.debug && probe.debug.ngRepeats || []).join(' | ');
-        log('💬 已识别讨论视图，等待内容渲染…' + (ng ? '（页面 ng-repeat: ' + ng.slice(0, 110) + '）' : ''));
+        let msg = '💬 已识别讨论视图，等待内容渲染…';
+        if (ng) msg += '（ng-repeat: ' + ng.slice(0, 130) + '）';
+        if (probe.debug && probe.debug.inIframe) msg += '（探针命中 iframe）';
+        if (probe.debug && probe.debug.replyBtns && probe.debug.replyBtns.length) {
+          msg += '（发现回复按钮: ' + probe.debug.replyBtns.join(' ;; ').slice(0, 120) + '）';
+        }
+        log(msg);
+        const net = (probe.debug && probe.debug.net) || [];
+        if (net.length) {
+          log('🔍 近期请求: ' + net.map((r) => r.m + ' ' + r.u).join(' ;; ').slice(0, 180));
+        }
       }
       if (discState.firstSeenAt && Date.now() - discState.firstSeenAt > 90000) {
         discState.done = true;
@@ -2673,6 +2581,9 @@ if (window.self === window.top) { // 防 iframe 多次注入，只在顶层运�
     await Store.ready;
     await waitBody();
     buildPanel();
+
+    // 🔍 讨论网络追踪：向所有 frame 注入 MAIN world 钩子（诊断 + 兜底线索）
+    pageEval('hook').catch(() => {});
 
     if (isExamPage()) return; // 考试页：只要面板（LLM 答题 + 复制），不挂机不隐身
 

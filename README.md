@@ -4,7 +4,7 @@
 
 _优课在线（UOOC / 优课联盟）全自动挂机 + AI 答题 · 浏览器扩展（Manifest V3）_
 
-![version](https://img.shields.io/badge/version-3.1.3-blue)
+![version](https://img.shields.io/badge/version-3.1.4-blue)
 ![chrome](https://img.shields.io/badge/Chrome%20%7C%20Edge-MV3-brightgreen)
 ![license](https://img.shields.io/badge/license-MIT-orange)
 
@@ -115,6 +115,14 @@ _优课在线（UOOC / 优课联盟）全自动挂机 + AI 答题 · 浏览器�
 任何刷课行为都有风险，请自行评估。本工具仅作技术学习交流用途。
 
 ## 📜 更新日志
+
+### v3.1.4
+- **修复：页面世界注入全部失败（CSP 拦截）**。根因：background 用 `new Function()` 构造注入函数，触发 MV3 扩展页 CSP 的 `unsafe-eval` 拦截，讨论探针与发帖调用从未执行过（日志可证：`'unsafe-eval' is not an allowed source of script`）
+- **修复方式**：注入函数整体移入 background 定义，`chrome.scripting.executeScript` 直接传**函数引用**（Chrome 内部序列化，不走 eval）；`PAGE_INJECT = {probe, submit, hook}` 按名分发
+- **多 frame 支持**：注入改为 `allFrames: true`，讨论渲染在同源 iframe 时也能命中；返回值挑选策略优先含 detail/list 的结果
+- **iframe 场景闭环**：`data-uooc-tid` 标记与列表项点击、详情「返回」按钮查找均支持同源 iframe 遍历
+- **诊断增强**：新增 MAIN world 网络钩子（幂等注入所有 frame），探针回传最近讨论相关请求 URL/body；未就绪日志额外输出 iframe 命中与「回复按钮」选择器信息
+- 讨论发帖提交改为同步返回 Promise（`executeScript` 正确等待结果）
 
 ### v3.1.3
 - **修复：讨论区被自动跳过、不触发发帖、开关不生效**。v3.1.1 的讨论识别只认 course 页的 `#/discuss` hash 路由，而学习页是把讨论作为**内嵌资源**渲染（URL 仍是 `#/cid/chapter/resourceId`，hash 无 discuss 字样），导致流程从未触发，直接落到「无视频资源 6 秒跨越」被跳过
