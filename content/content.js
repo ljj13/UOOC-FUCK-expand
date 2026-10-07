@@ -727,6 +727,7 @@ if (window.self === window.top) { // 防 iframe 多次注入，只在顶层运�
     else playDing();
 
     resumeVideo();
+    scheduleAutoCollapse(); // 启动 1.5s 后自动收起为胶囊（用户展开过则不收）
   }
 
   function stopEngine() {
@@ -1631,11 +1632,72 @@ if (window.self === window.top) { // 防 iframe 多次注入，只在顶层运�
     x: _svg('<line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/>'),
   };
 
+  // ---- 面板收起/展开 + 挂机后自动退场 ----
+  // 启动挂机成功后 1.5s 自动最小化为胶囊；用户主动展开过一次后，
+  // 本次页面生命周期内不再自动收起；停止挂机不会强制展开。
+  let autoCollapseTimer = null;
+  let userReExpanded = false;
+  let dragInProgress = false;
+
+  function panelIsVisible() {
+    const p = document.getElementById('uooc-video-panel');
+    return !!(p && p.style.display !== 'none');
+  }
+
+  // 靠近浏览器左右边缘时吸附到 12px 边距
+  function snapToEdge(el) {
+    const margin = 12, dist = 44;
+    let left = parseFloat(el.style.left);
+    if (isNaN(left)) left = el.offsetLeft;
+    const w = el.offsetWidth;
+    if (left < dist) left = margin;
+    if (window.innerWidth - left - w < dist) left = window.innerWidth - w - margin;
+    el.style.left = left + 'px';
+  }
+
+  function minimizePanel() {
+    const p = document.getElementById('uooc-video-panel');
+    const b = document.getElementById('uooc-min-ball');
+    if (!p || !b) return;
+    // 胶囊继承面板当前位置，避免跳位
+    const r = p.getBoundingClientRect();
+    b.style.left = Math.max(8, r.left) + 'px';
+    b.style.top = Math.max(8, r.top) + 'px';
+    snapToEdge(b);
+    p.style.display = 'none';
+    b.style.display = 'flex';
+  }
+
+  function expandPanel(byUser) {
+    const p = document.getElementById('uooc-video-panel');
+    const b = document.getElementById('uooc-min-ball');
+    if (!p || !b) return;
+    const r = b.getBoundingClientRect();
+    b.style.display = 'none';
+    p.style.display = 'block'; // 先显示再测量，offsetWidth 才有值
+    const maxLeft = window.innerWidth - p.offsetWidth - 12;
+    p.style.left = Math.max(8, Math.min(r.left, maxLeft)) + 'px';
+    p.style.top = Math.max(8, Math.min(r.top, window.innerHeight - 120)) + 'px';
+    if (byUser) userReExpanded = true; // 用户主动展开后，本生命周期不再自动收起
+  }
+
+  function scheduleAutoCollapse() {
+    if (userReExpanded) return;
+    if (autoCollapseTimer) clearTimeout(autoCollapseTimer);
+    autoCollapseTimer = setTimeout(() => {
+      autoCollapseTimer = null;
+      if (engineStarted && !userReExpanded && !dragInProgress && panelIsVisible()) {
+        minimizePanel();
+        log('🎛️ 面板已自动收起，点击左侧胶囊可随时展开');
+      }
+    }, 1500);
+  }
+
   function buildPanel() {
     if (document.getElementById('uooc-video-panel')) return;
 
     const css = `
-        #uooc-video-panel { position:fixed; top:20px; left:20px; width:264px; background:rgba(12,17,27,.96); backdrop-filter:blur(14px) saturate(130%); color:#f8fafc; z-index:2147483647; pointer-events:auto; border:1px solid rgba(148,163,184,.14); border-radius:12px; box-shadow:0 18px 45px rgba(0,0,0,.28), 0 2px 8px rgba(0,0,0,.22); font-family:Inter,ui-sans-serif,system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI","Microsoft YaHei",sans-serif; display:block; }
+        #uooc-video-panel { position:fixed; top:20px; left:20px; width:264px; background:rgba(11,17,27,.94); backdrop-filter:blur(12px) saturate(130%); color:#f8fafc; z-index:2147483647; pointer-events:auto; border:1px solid rgba(148,163,184,.14); border-radius:12px; box-shadow:0 18px 45px rgba(0,0,0,.28), 0 2px 8px rgba(0,0,0,.22); font-family:Inter,ui-sans-serif,system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI","Microsoft YaHei",sans-serif; display:block; }
         #uooc-video-panel * { box-sizing:border-box; }
         #uooc-drag-bar { display:flex; align-items:center; gap:9px; padding:9px 12px; cursor:move; user-select:none; border-bottom:1px solid rgba(148,163,184,.14); }
         #uooc-header-dot { flex:none; width:9px; height:9px; border-radius:50%; background:#64748b; transition:background .2s ease; }
@@ -1649,14 +1711,14 @@ if (window.self === window.top) { // 防 iframe 多次注入，只在顶层运�
         .uooc-bar-icons span { display:flex; align-items:center; justify-content:center; width:24px; height:24px; border-radius:6px; cursor:pointer; color:#7f8da3; transition:background 140ms ease, color 140ms ease; }
         .uooc-bar-icons span:hover { background:rgba(148,163,184,.12); color:#e2e8f0; }
         .uooc-bar-icons svg, .uooc-sec-gear svg { width:15px; height:15px; }
-        #uooc-panel-body { padding:10px 12px 12px; }
+        #uooc-panel-body { padding:8px 12px 10px; }
         .uooc-sec-head { display:flex; align-items:center; justify-content:space-between; margin:2px 0 8px; }
         .uooc-sec-title { font-size:11px; font-weight:600; color:#7f8da3; letter-spacing:.4px; }
         .uooc-sec-status { font-size:10px; color:#64748b; transition:color .2s ease; }
         .uooc-sec-status.on { color:#22c55e; }
         .uooc-sec-gear { display:flex; align-items:center; justify-content:center; width:22px; height:22px; border-radius:6px; cursor:pointer; color:#7f8da3; transition:background 140ms ease, color 140ms ease; }
         .uooc-sec-gear:hover { background:rgba(148,163,184,.12); color:#e2e8f0; }
-        #uooc-helper-rows, #uooc-ai-sec, .uooc-log-sec { margin-top:10px; padding-top:8px; border-top:1px solid rgba(148,163,184,.10); }
+        #uooc-helper-rows, #uooc-ai-sec, .uooc-log-sec { margin-top:8px; padding-top:6px; border-top:1px solid rgba(148,163,184,.10); }
         #uooc-start-btn { display:flex; align-items:center; justify-content:center; gap:7px; width:100%; height:34px; background:#3b82f6; color:#fff; border:none; border-radius:7px; font-size:12px; font-weight:600; cursor:pointer; font-family:inherit; transition:background 140ms ease, border-color 140ms ease, transform 80ms ease; }
         #uooc-start-btn:hover { background:#4b8df8; }
         #uooc-start-btn:active { transform:translateY(1px); }
@@ -1704,7 +1766,7 @@ if (window.self === window.top) { // 防 iframe 多次注入，只在顶层运�
         #uooc-copy-btn:focus-visible { outline:none; box-shadow:0 0 0 2px #0c111b, 0 0 0 4px rgba(59,130,246,.55); }
         .uooc-log-head-clear { font-size:10px; color:#7f8da3; cursor:pointer; padding:2px 6px; border-radius:5px; user-select:none; transition:background 140ms ease, color 140ms ease; }
         .uooc-log-head-clear:hover { background:rgba(148,163,184,.10); color:#cbd5e1; }
-        #uooc-log { height:92px; overflow-y:auto; background:#0a101a; border:1px solid rgba(148,163,184,.14); border-radius:8px; padding:7px 8px; font-family:ui-monospace,"Cascadia Code",Consolas,monospace; font-size:10px; line-height:1.55; color:#9eacc0; }
+        #uooc-log { height:68px; overflow-y:auto; background:#0a101a; border:1px solid rgba(148,163,184,.14); border-radius:8px; padding:7px 8px; font-family:ui-monospace,"Cascadia Code",Consolas,monospace; font-size:10px; line-height:1.55; color:#9eacc0; }
         #uooc-log div { word-break:break-all; }
         #uooc-log .log-success { color:#86efac; }
         #uooc-log .log-warning { color:#fcd34d; }
@@ -1716,7 +1778,9 @@ if (window.self === window.top) { // 防 iframe 多次注入，只在顶层运�
         #uooc-min-ball { position:fixed; top:20px; left:20px; width:40px; height:40px; background:rgba(15,23,42,.96); border:1px solid rgba(148,163,184,.18); border-radius:12px; z-index:2147483647; pointer-events:auto; display:none; align-items:center; justify-content:center; cursor:move; user-select:none; box-shadow:0 10px 30px rgba(0,0,0,.30); }
         .uooc-ball-u { font-size:15px; font-weight:700; color:#cbd5e1; }
         .uooc-ball-dot { display:none; position:absolute; top:-2px; right:-2px; width:10px; height:10px; border-radius:50%; background:#22c55e; border:2px solid #0b0f17; }
-        #uooc-min-ball.running .uooc-ball-dot { display:block; }
+        #uooc-min-ball.running .uooc-ball-dot { display:block; animation:uooc-ballpulse 2.4s ease-in-out infinite; }
+        @keyframes uooc-ballpulse { 0%,100% { box-shadow:0 0 0 2px rgba(34,197,94,.12); } 50% { box-shadow:0 0 0 5px rgba(34,197,94,.30); } }
+        @media (prefers-reduced-motion: reduce) { #uooc-min-ball.running .uooc-ball-dot { animation:none; } }
     `;
     const style = document.createElement('style');
     style.innerHTML = css;
@@ -1756,7 +1820,7 @@ if (window.self === window.top) { // 防 iframe 多次注入，只在顶层运�
                 <span class="uooc-switch"></span>
               </label>
               <label class="uooc-setting" title="托管播放速度">
-                <span class="uooc-setting-text"><span class="uooc-setting-title">倍速</span><span class="uooc-setting-desc">托管播放速度</span></span>
+                <span class="uooc-setting-text"><span class="uooc-setting-title">倍速</span></span>
                 <select id="uooc-rate-value" class="uooc-select">
                   <option value="1">1.0x</option>
                   <option value="1.25">1.25x</option>
@@ -1769,7 +1833,7 @@ if (window.self === window.top) { // 防 iframe 多次注入，只在顶层运�
                 <span class="uooc-switch"></span>
               </label>
               <label class="uooc-setting" title="自动静音视频">
-                <span class="uooc-setting-text"><span class="uooc-setting-title">静音</span><span class="uooc-setting-desc">自动静音视频</span></span>
+                <span class="uooc-setting-text"><span class="uooc-setting-title">静音</span></span>
                 <input type="checkbox" id="uooc-mute-on">
                 <span class="uooc-switch"></span>
               </label>
@@ -1923,10 +1987,10 @@ if (window.self === window.top) { // 防 iframe 多次注入，只在顶层运�
       btn.style.opacity = Store.get('llmEnabled', false) ? '1' : '0.5';
     }
 
-    // ---- 拖拽与最小化 ----
-    let isDragging = false, startX, startY, initLeft, initTop;
+    // ---- 拖拽（带左右边缘吸附）与最小化 ----
+    let isDragging = false, dragMoved = 0, suppressClick = false, startX, startY, initLeft, initTop;
     dragBar.onmousedown = ball.onmousedown = (e) => {
-      isDragging = true;
+      isDragging = true; dragMoved = 0; dragInProgress = true;
       startX = e.clientX; startY = e.clientY;
       const t = panel.style.display !== 'none' ? panel : ball;
       initLeft = t.offsetLeft; initTop = t.offsetTop;
@@ -1934,17 +1998,30 @@ if (window.self === window.top) { // 防 iframe 多次注入，只在顶层运�
     document.onmousemove = (e) => {
       if (!isDragging) return;
       const t = panel.style.display !== 'none' ? panel : ball;
-      t.style.left = (initLeft + e.clientX - startX) + 'px';
-      t.style.top = (initTop + e.clientY - startY) + 'px';
+      let nl = initLeft + e.clientX - startX;
+      const nt = initTop + e.clientY - startY;
+      dragMoved = Math.max(dragMoved, Math.abs(e.clientX - startX) + Math.abs(e.clientY - startY));
+      // 左右边缘吸附：进入边缘 44px 范围就吸附到 12px 边距
+      if (nl < 44) nl = 12;
+      if (window.innerWidth - nl - t.offsetWidth < 44) nl = window.innerWidth - t.offsetWidth - 12;
+      t.style.left = nl + 'px';
+      t.style.top = Math.max(0, Math.min(nt, window.innerHeight - 40)) + 'px';
     };
-    document.onmouseup = () => { isDragging = false; };
-    document.getElementById('uooc-min-btn').onclick = () => {
-      panel.style.display = 'none';
-      ball.style.display = 'flex';
+    document.onmouseup = () => {
+      if (isDragging && dragMoved > 4) {
+        // 拖拽结束的 mouseup 会跟着一次 click，抑制掉避免胶囊误展开
+        suppressClick = true;
+        setTimeout(() => { suppressClick = false; }, 0);
+      }
+      isDragging = false;
+      dragInProgress = false;
+      const t = panel.style.display !== 'none' ? panel : ball;
+      snapToEdge(t);
     };
+    document.getElementById('uooc-min-btn').onclick = () => minimizePanel();
     ball.onclick = () => {
-      ball.style.display = 'none';
-      panel.style.display = 'block';
+      if (suppressClick) return;
+      expandPanel(true);
     };
 
     // ---- 考试页精简：隐藏挂机/视频相关控件 ----

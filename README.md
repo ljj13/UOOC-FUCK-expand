@@ -4,7 +4,7 @@
 
 _优课在线（UOOC / 优课联盟）全自动挂机 + AI 答题 · 浏览器扩展（Manifest V3）_
 
-![version](https://img.shields.io/badge/version-3.0.0-blue)
+![version](https://img.shields.io/badge/version-3.1.0-blue)
 ![chrome](https://img.shields.io/badge/Chrome%20%7C%20Edge-MV3-brightgreen)
 ![license](https://img.shields.io/badge/license-MIT-orange)
 
@@ -111,6 +111,14 @@ _优课在线（UOOC / 优课联盟）全自动挂机 + AI 答题 · 浏览器�
 任何刷课行为都有风险，请自行评估。本工具仅作技术学习交流用途。
 
 ## 📜 更新日志
+
+### v3.1.0
+- **挂机后自动退场**：点火成功 1.5s 后面板自动收起为状态胶囊；用户主动展开过一次后，本次页面生命周期内不再自动收起；停止挂机不强制展开
+- **胶囊状态点呼吸**：引擎运行时右上角绿色状态点带轻微脉冲（尊重 prefers-reduced-motion）
+- **拖拽边缘吸附**：面板与胶囊靠近浏览器左右边缘时自动吸附到 12px 边距；展开/收起时位置互相继承不跳位；拖拽结束不再误触胶囊展开
+- **面板瘦身**：删去倍速/静音的重复副说明，日志区 92→68px，整体高度约矮 50px
+- **背景微调**：面板底色 rgba(11,17,27,.94) + blur(12px)，稍微轻盈但不牺牲可读性
+- 纯 UI/交互收口：DOM ID、Storage Key、事件绑定、业务逻辑零改动
 
 ### v3.0.0
 - **修复**：自动续跑路径不再创建 AudioContext，消除扩展错误页的 "AudioContext was not allowed to start" 警告（心跳只在手动点火时启动，防降频由伪装可见性兜底）
