@@ -1,0 +1,55 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <style>
+    body { width: 250px; margin: 0; padding: 12px; font-family: "Microsoft YaHei", sans-serif; font-size: 12px; color: #333; background: #fafafa; }
+    h1 { font-size: 14px; margin: 0 0 10px; color: #2980b9; display: flex; align-items: center; gap: 6px; }
+    .state { background: #fff; border: 1px solid #e0e0e0; border-radius: 6px; padding: 8px 10px; margin-bottom: 10px; line-height: 1.7; }
+    .row { display: flex; align-items: center; gap: 8px; margin-bottom: 8px; }
+    .row label { display: flex; align-items: center; gap: 4px; cursor: pointer; user-select: none; }
+    select { padding: 1px 3px; }
+    .btns { display: flex; gap: 6px; }
+    button { flex: 1; padding: 6px 0; border: none; border-radius: 4px; cursor: pointer; font-size: 12px; background: #2980b9; color: #fff; }
+    button:hover { background: #21688f; }
+    .tip { margin-top: 10px; color: #999; font-size: 11px; line-height: 1.5; }
+  </style>
+</head>
+<body>
+  <h1>🤖 UOOC 助手 Pro</h1>
+
+  <div class="state">
+    <div id="engine-state">⚪ 引擎状态读取中...</div>
+    <div id="llm-state">⚪ AI 配置读取中...</div>
+  </div>
+
+  <div class="row">
+    <label><input type="checkbox" id="rate-on">倍速</label>
+    <select id="rate-value">
+      <option value="1">1.0x</option>
+      <option value="1.25">1.25x</option>
+      <option value="1.5">1.5x</option>
+      <option value="2">2.0x</option>
+      <option value="2.5">2.5x</option>
+      <option value="3">3.0x</option>
+    </select>
+    <label><input type="checkbox" id="mute-on">静音</label>
+  </div>
+  <div class="row">
+    <label><input type="checkbox" id="play-on">播放</label>
+    <label><input type="checkbox" id="continue-on">连播</label>
+    <label><input type="checkbox" id="popup-on">弹窗秒答</label>
+  </div>
+  <div class="row">
+    <label><input type="checkbox" id="llm-on">LLM答题</label>
+  </div>
+
+  <div class="btns">
+    <button id="open-options">⚙️ AI 设置</button>
+  </div>
+
+  <div class="tip">点火启动 / 刷新 / 急救 / 日志等控制台在 uooc.net.cn 页面左侧的悬浮面板里。</div>
+
+  <script src="popup.js"></script>
+</body>
+</html>
