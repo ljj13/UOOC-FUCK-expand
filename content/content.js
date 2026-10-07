@@ -1530,6 +1530,12 @@ if (window.self === window.top) { // 防 iframe 多次注入，只在顶层运�
     }
     const out = { hasAngular: !!window.angular };
     try {
+      // 结构诊断信息：探针未命中时输出，便于定位站点结构差异
+      out.debug = {
+        ngRepeats: Array.from(document.querySelectorAll('[ng-repeat]'))
+          .slice(0, 12).map((n) => String(n.getAttribute('ng-repeat')).slice(0, 40)),
+        hasDiscuz: !!document.querySelector('.Discuz')
+      };
       if (window.angular) {
         const lnodes = document.querySelectorAll(
           '[ng-repeat*="chapter_tiezi in questionList[2]"],[ng-repeat*="tiezi in studentList[0]"],[ng-repeat*="tiezi in comList"],[uooc-pager],.Discuz');
@@ -1541,10 +1547,13 @@ if (window.self === window.top) { // 防 iframe 多次注入，只在顶层运�
             const list = Array.isArray(s.studentList && s.studentList[0]) ? s.studentList[0]
               : Array.isArray(s.comList) ? s.comList
               : Array.isArray(s.questionList && s.questionList[2]) ? s.questionList[2] : [];
-            out.list = list.map((it) => ({
-              tid: String(it.tid || it.thread_id || it.topic_id || it.id || ''),
-              title: strip(it.subject || it.title || it.content || '', 100)
-            })).filter((x) => x.tid);
+            const listEls = document.querySelectorAll('[ng-repeat*="tiezi"], .discussion-item, .thread-item');
+            out.list = list.map((it, i) => {
+              const tid = String(it.tid || it.thread_id || it.topic_id || it.id || '');
+              const el = listEls[i];
+              if (el && tid) { try { el.setAttribute('data-uooc-tid', tid); } catch (e) { /* 忽略 */ } }
+              return { tid, title: strip(it.subject || it.title || it.content || '', 100) };
+            }).filter((x) => x.tid);
             const pages = (s.noteListPaper && (s.noteListPaper.total || s.noteListPaper.pages))
               || (s.questionListPaper && s.questionListPaper[2] && (s.questionListPaper[2].pageCount || s.questionListPaper[2].pages)) || 1;
             out.pages = Number(pages) || 1;
@@ -1639,10 +1648,18 @@ if (window.self === window.top) { // 防 iframe 多次注入，只在顶层运�
     const isDetail = low.includes('discussdetail');
     const isList = !isDetail && (low[0] === 'discuss' || low[0] === 'discusscom');
     const nums = segs.filter((s) => /^\d+$/.test(s) && s !== cid);
+    // DOM 检测：学习页把讨论作为内嵌资源渲染（hash 是 #/cid/chapter/resource 形式，
+    // 不含 discuss 字样），此时靠页面结构判定——列表项 / 详情容器出现即视为讨论视图
+    let domList = false, domDetail = false;
+    try {
+      domList = !!(document.querySelector('[ng-repeat*="tiezi"], .discussion-item, .thread-item, .Discuz'));
+      domDetail = !!(document.querySelector('[thread-detail], .thesis-content, .discuss-header, [ng-bind-html*="threads.content"]'));
+    } catch (e) { /* 忽略 */ }
     return {
-      active: isDetail || isList,
-      isDetail,
-      isList,
+      active: isDetail || isList || domList || domDetail,
+      isDetail: isDetail || (!isList && domDetail),
+      isList: isList || (domList && !domDetail),
+      domInline: !isDetail && !isList, // 学习页内嵌：无 hash 路由，靠 DOM 点击进出帖子
       cid,
       mode: (low[0] === 'discusscom' || (isDetail && low[0] === 'discussdetail')) ? 'old' : 'new',
       tid: isDetail ? (nums[0] || '') : ''
@@ -1652,9 +1669,25 @@ if (window.self === window.top) { // 防 iframe 多次注入，只在顶层运�
     location.hash = mode === 'old' ? '#/discusscom' : '#/discuss';
   }
   function navDiscussionDetail(route, tid) {
+    // 学习页内嵌讨论没有 hash 路由：直接点击列表项进入详情
+    const el = document.querySelector('[data-uooc-tid="' + tid + '"]');
+    if (el) { try { el.click(); return; } catch (e) { /* 落到 hash 导航 */ } }
     location.hash = route.mode === 'old'
       ? '#/discussdetail/com/' + encodeURIComponent(tid)
       : '#/discuss/' + encodeURIComponent(tid) + '/' + encodeURIComponent(route.cid) + '/discussDetail';
+  }
+  // 学习页内嵌详情回列表：尝试常见返回/关闭入口
+  function dismissDiscussionDetail() {
+    const sels = ['.discuss-back', '.back-btn', '.btn-back', '.discuss-header .back',
+      '[ng-click*="back"]', '[ng-click*="Back"]', '.layui-layer-close'];
+    for (const s of sels) {
+      const el = document.querySelector(s);
+      if (el && el.offsetHeight > 0) { try { el.click(); return true; } catch (e) { /* 继续 */ } }
+    }
+    const backBtn = Array.from(document.querySelectorAll('a, button, span'))
+      .find((e) => /^(返回|返 回)$/.test((e.innerText || '').trim()) && e.offsetHeight > 0);
+    if (backBtn) { try { backBtn.click(); return true; } catch (e) { /* 忽略 */ } }
+    return false;
   }
 
   // 已回帖持久化去重（按课程，最多留 80 条）
@@ -1699,15 +1732,20 @@ if (window.self === window.top) { // 防 iframe 多次注入，只在顶层运�
 
   async function discussionTick(route) {
     if (!discState) {
-      discState = { busy: false, done: false, tried: new Set(), failCount: 0, coolUntil: 0 };
+      discState = {
+        busy: false, done: false, skip: false, tried: new Set(),
+        failCount: 0, coolUntil: 0, firstSeenAt: Date.now()
+      };
       log('💬 进入讨论区：AI 将为未回复的帖子自动生成并发帖');
     }
-    if (discState.busy || discState.done || Date.now() < discState.coolUntil) return;
+    if (discState.busy || discState.done || discState.skip) return;
+    if (Date.now() < discState.coolUntil) return; // 回帖间隔冷却
     if (!Store.get('llmEnabled', false)) {
       if (!discState.llmWarned) {
         discState.llmWarned = true;
-        log('⚠️ 讨论区发帖需要 LLM：请打开「LLM 答题」并配置好 API');
+        log('⚠️ 讨论区发帖需要 LLM：请打开「LLM 答题」并配置好 API（本次跳过讨论）');
       }
+      discState.skip = true; // 放行主循环，按普通资源跨越
       return;
     }
 
@@ -1722,7 +1760,8 @@ if (window.self === window.top) { // 防 iframe 多次注入，只在顶层运�
         const { tid, title, content } = probe.detail;
         if (!title && !content) throw new Error('帖子内容尚未加载');
         if (replied.includes(tid) || discState.tried.has(tid)) {
-          navDiscussionList(route.mode); // 已回过：回列表找下一个
+          // 已回过：学习页内嵌靠返回按钮，course 页靠 hash 导航
+          if (!dismissDiscussionDetail()) navDiscussionList(route.mode);
           return;
         }
         log(`💬 正在回复帖子：${(title || tid).slice(0, 24)}`);
@@ -1732,39 +1771,58 @@ if (window.self === window.top) { // 防 iframe 多次注入，只在顶层运�
         if (!res || res.__err) throw new Error((res && res.__err) || '发帖失败');
         discRepliedAdd(tid);
         discState.tried.add(tid);
-        log(`✅ 讨论回复已发布（${tid}），稍后回列表继续`);
+        log(`✅ 讨论回复已发布（${tid}），返回列表继续`);
         discState.coolUntil = Date.now() + 8000 + Math.floor(Math.random() * 12000);
-        await wait(1500);
-        navDiscussionList(route.mode);
+        await wait(1200);
+        if (!dismissDiscussionDetail()) navDiscussionList(route.mode);
         return;
       }
 
-      // 列表视图：找下一个未回帖
-      if (route.isList) {
-        const next = (probe.list || []).find((it) =>
+      // 列表视图：找下一个未回帖并进入
+      if (probe.list && probe.list.length) {
+        const next = probe.list.find((it) =>
           it.tid && !replied.includes(it.tid) && !discState.tried.has(it.tid));
         if (!next) {
           discState.done = true;
           log('💬 讨论区当前列表的帖子已全部回复完成');
           speak('讨论完成');
-          if (lastLearnHash) location.hash = lastLearnHash; // 回学习视图继续挂机
+          if (lastLearnHash && route.domInline) location.hash = lastLearnHash; // 内嵌场景回学习视图
           return;
         }
+        log(`💬 进入帖子：${(next.title || next.tid).slice(0, 24)}`);
         navDiscussionDetail(route, next.tid);
         return;
+      }
+
+      // 探针未就绪（列表/详情都没渲染出来）：等待下一轮，90 秒兜底放行
+      if (!discState.notedProbe) {
+        discState.notedProbe = true;
+        const ng = (probe.debug && probe.debug.ngRepeats || []).join(' | ');
+        log('💬 已识别讨论视图，等待内容渲染…' + (ng ? '（页面 ng-repeat: ' + ng.slice(0, 110) + '）' : ''));
+      }
+      if (discState.firstSeenAt && Date.now() - discState.firstSeenAt > 90000) {
+        discState.done = true;
+        log('❌ 讨论内容 90 秒内未渲染，放行引擎继续（可稍后重新进入讨论区重试）');
       }
     } catch (e) {
       discState.failCount++;
       log('⚠️ 讨论区处理失败（' + (e.message || e) + '）');
       if (discState.failCount >= 6) {
         discState.done = true;
-        log('❌ 讨论区连续失败，本页不再自动发帖（重新进入讨论区可重试）');
+        log('❌ 讨论区连续失败，本资源不再自动发帖（重新进入讨论区可重试）');
       } else {
         discState.coolUntil = Date.now() + 5000;
       }
     } finally {
       discState.busy = false;
     }
+  }
+
+  // 当前激活的小节名（讨论资源识别用）
+  function activeNameQuick() {
+    const nodes = document.querySelectorAll('.oneline.active, .basic.active');
+    const n = nodes.length ? nodes[nodes.length - 1] : null;
+    return n ? n.innerText.trim().split(/\r?\n/)[0] : '';
   }
 
   // ==================== 10. 复制题目答案（已提交测验的回顾页） ====================
@@ -2414,13 +2472,22 @@ if (window.self === window.top) { // 防 iframe 多次注入，只在顶层运�
       }
       isVerifyAlarmed = false;
 
-      // 💬 讨论区接管：引擎运行 + 开关开启 + 当前在讨论视图时，AI 发帖流程独占本循环
+      // 💬 讨论区接管：引擎运行 + 「讨论区发帖」开关开启时，AI 发帖流程独占本循环。
+      // 识别同时覆盖两种场景：course 页的 #/discuss 系列 hash 路由，以及学习页里
+      // 把讨论作为内嵌资源渲染的情况（hash 无 discuss 字样，靠 DOM 结构 + 小节名判定）。
+      // 开关关闭 → 不接管，按普通无视频资源跨越（这就是"根据开关而定"）。
       const disc = discussionRoute();
-      if (disc.active) {
-        if (engineStarted && Store.get('discussionOn', true)) discussionTick(disc);
-        return;
+      const discByName = /讨论/.test(activeNameQuick());
+      if (engineStarted && (disc.active || discByName) && Store.get('discussionOn', true)) {
+        discussionTick(disc);
+        if (discState && discState.skip) {
+          discState.skip = false; // LLM 未配置：放行本轮，走下面的普通跨越
+        } else if (!(discState && discState.done)) {
+          return; // 处理中 / 等待内容渲染：独占主循环
+        }
+        // done：落到下面按普通资源跨越，自动进入下一节
       }
-      if (location.hash) lastLearnHash = location.hash; // 记录学习视图 hash，讨论完成后返回
+      if (!disc.active && location.hash) lastLearnHash = location.hash; // 记录学习视图 hash，讨论完成后返回
 
       // ------------------------------------------
       // 第零优先级：弹窗判定与主循环避让
@@ -2553,8 +2620,10 @@ if (window.self === window.top) { // 防 iframe 多次注入，只在顶层运�
       // 给 6 秒缓冲再跳 —— 否则会永远卡在这种页面上（如日志里"目标锁定：文本"后不动）。
       // ------------------------------------------
       if (!isJumping) {
+        // 注：「讨论」不在附件名单里——讨论由上面的 discussionTick 流程控制，
+        // 开关关/LLM 未配/处理完成时才落到这里按普通无视频资源跨越（6 秒）。
         const isAttachment = window.location.href.includes('/files')
-          || /(附件|讨论)/.test(activeName)
+          || /(附件)/.test(activeName)
           || document.querySelector('.course-select-resource')
           || pageText.includes('请选择课程资源');
 
@@ -2584,6 +2653,11 @@ if (window.self === window.top) { // 防 iframe 多次注入，只在顶层运�
     if (msg && msg.type === 'PANEL_EXPAND') {
       try { expandPanel(true); } catch (e) { /* 忽略 */ }
     }
+  });
+
+  // 切换小节/资源（hash 变化）时重置讨论状态机，让新资源从头识别
+  window.addEventListener('hashchange', () => {
+    discState = null;
   });
 
   function waitBody() {

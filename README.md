@@ -4,7 +4,7 @@
 
 _优课在线（UOOC / 优课联盟）全自动挂机 + AI 答题 · 浏览器扩展（Manifest V3）_
 
-![version](https://img.shields.io/badge/version-3.1.2-blue)
+![version](https://img.shields.io/badge/version-3.1.3-blue)
 ![chrome](https://img.shields.io/badge/Chrome%20%7C%20Edge-MV3-brightgreen)
 ![license](https://img.shields.io/badge/license-MIT-orange)
 
@@ -115,6 +115,14 @@ _优课在线（UOOC / 优课联盟）全自动挂机 + AI 答题 · 浏览器�
 任何刷课行为都有风险，请自行评估。本工具仅作技术学习交流用途。
 
 ## 📜 更新日志
+
+### v3.1.3
+- **修复：讨论区被自动跳过、不触发发帖、开关不生效**。v3.1.1 的讨论识别只认 course 页的 `#/discuss` hash 路由，而学习页是把讨论作为**内嵌资源**渲染（URL 仍是 `#/cid/chapter/resourceId`，hash 无 discuss 字样），导致流程从未触发，直接落到「无视频资源 6 秒跨越」被跳过
+- **识别重做**：hash 路由 + DOM 结构（`[ng-repeat*="tiezi"]`/`.Discuz`/详情容器）+ 小节名含「讨论」三路识别，覆盖两种场景
+- **开关正确分流**：开关关 → 不接管，按普通资源跨越；开关开+LLM 已配 → 接管直到全部回完才放行；开关开+LLM 未配 → 提示一次后放行（不卡死）
+- **学习页内嵌场景的进出**：列表项打 `data-uooc-tid` 标记后直接 DOM 点击进详情；回帖后优先点「返回/关闭」按钮回列表，course 页退回 hash 导航
+- **未就绪兜底**：讨论视图已识别但内容 90 秒未渲染 → 放行引擎继续；首次未就绪时输出页面 `ng-repeat` 结构到日志，便于定位站点改版
+- 切换小节（hash 变化）自动重置讨论状态机，新资源从头识别
 
 ### v3.1.2
 - **修复：胶囊收起后点击无法展开**。真正根因：v3.1.1 加讨论区开关时只在设置页/Popup 加了控件、漏了悬浮面板，而面板 JS 引用了不存在的 `uooc-disc-on` 元素——`getElementById` 返回 null 导致 `addEventListener` 抛异常，**buildPanel 从该行起整个中断**，之后的拖拽/胶囊/最小化等所有绑定集体消失（启动按钮绑定在异常点之前，所以症状隐蔽）
