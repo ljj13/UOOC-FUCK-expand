@@ -117,10 +117,10 @@ _优课在线（UOOC / 优课联盟）全自动挂机 + AI 答题 · 浏览器�
 ## 📜 更新日志
 
 ### v3.1.2
-- **修复：胶囊收起后点击无法展开**。第一轮修复（mouseup 按位移判定）在部分环境仍无效，确认根因是事件通道问题：`document.onmouseup/onmousemove` 属性赋值监听会被页面脚本整体覆盖，click 又会被站点全局 mouse/click 处理器干扰
-- **彻底重做事件通道**：面板拖拽改 `addEventListener` 捕获阶段监听（先于页面处理器）；胶囊改 Pointer Capture——拖拽与点击判定全部在胶囊自身事件上完成；pointerup 与 click 双通道展开（500ms 去重）；胶囊加 `touch-action:none` 支持触摸拖拽
-- **新增兜底通道**：Popup 增加「展开悬浮面板」按钮（向课程页发消息强制展开），即使页面事件环境异常也永远有可靠入口
-- 纯交互层重做：DOM ID、Storage Key、业务逻辑零改动
+- **修复：胶囊收起后点击无法展开**。真正根因：v3.1.1 加讨论区开关时只在设置页/Popup 加了控件、漏了悬浮面板，而面板 JS 引用了不存在的 `uooc-disc-on` 元素——`getElementById` 返回 null 导致 `addEventListener` 抛异常，**buildPanel 从该行起整个中断**，之后的拖拽/胶囊/最小化等所有绑定集体消失（启动按钮绑定在异常点之前，所以症状隐蔽）
+- **修复方式**：面板补上「讨论区发帖」开关；新增 `on()` 安全绑定助手，所有控件绑定逐个容错、任一缺失只告警不中断；新增 `tools/check-panel-ids.cjs` 静态校验（JS 引用的面板 ID 必须存在于 HTML 模板），防止此类问题再犯
+- 交互层同时加固：拖拽全部 `addEventListener` 捕获阶段、胶囊 Pointer Capture、pointerup 位移判定 + click 双通道展开（500ms 去重）、`touch-action:none`；Popup 保留「展开悬浮面板」兜底按钮
+- 纯交互层修复：DOM ID、Storage Key、业务逻辑零改动
 
 ### v3.1.1
 - **新增讨论区 AI 发帖**：引擎运行且处于课程讨论视图时自动接管——遍历帖子列表，LLM 依据标题+正文生成学生口吻回复，经站点 `courseService.discReply` 提交；回完自动找下一篇，全部完成后回学习视图继续挂机；已回帖按课程持久化去重（面板/Popup/设置页「讨论区」开关，默认开）
