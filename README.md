@@ -1,6 +1,6 @@
 <div align="center">
 
-# 🤖 UOOC 助手 Pro（整合版）
+# 🤖 UOOC-FUCK-expand
 
 _优课在线（UOOC / 优课联盟）全自动挂机 + AI 答题 · 浏览器扩展（Manifest V3）_
 
