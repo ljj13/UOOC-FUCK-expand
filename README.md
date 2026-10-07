@@ -4,7 +4,7 @@
 
 _优课在线（UOOC / 优课联盟）全自动挂机 + AI 答题 · 浏览器扩展（Manifest V3）_
 
-![version](https://img.shields.io/badge/version-3.1.1-blue)
+![version](https://img.shields.io/badge/version-3.1.2-blue)
 ![chrome](https://img.shields.io/badge/Chrome%20%7C%20Edge-MV3-brightgreen)
 ![license](https://img.shields.io/badge/license-MIT-orange)
 
@@ -115,6 +115,9 @@ _优课在线（UOOC / 优课联盟）全自动挂机 + AI 答题 · 浏览器�
 任何刷课行为都有风险，请自行评估。本工具仅作技术学习交流用途。
 
 ## 📜 更新日志
+
+### v3.1.2
+- **修复：胶囊收起后点击无法展开**。v3.1.1 用「拖拽抑制标志 + click 事件」区分拖拽和点击，高分屏/触摸板上手指轻微移动（>4px）就会把 click 全部吞掉，导致胶囊永远打不开。现改为完全不走 click 事件：在胶囊上松手且位移 ≤6px 即视为点击展开，移动超阈值才判为拖拽
 
 ### v3.1.1
 - **新增讨论区 AI 发帖**：引擎运行且处于课程讨论视图时自动接管——遍历帖子列表，LLM 依据标题+正文生成学生口吻回复，经站点 `courseService.discReply` 提交；回完自动找下一篇，全部完成后回学习视图继续挂机；已回帖按课程持久化去重（面板/Popup/设置页「讨论区」开关，默认开）

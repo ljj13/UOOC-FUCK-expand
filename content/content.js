@@ -2202,9 +2202,12 @@ if (window.self === window.top) { // 防 iframe 多次注入，只在顶层运�
     }
 
     // ---- 拖拽（带左右边缘吸附）与最小化 ----
-    let isDragging = false, dragMoved = 0, suppressClick = false, startX, startY, initLeft, initTop;
+    // 胶囊的"点击展开"不走 click 事件：click 会被站点全局处理器干扰，
+    // 且拖拽抑制标志在高分屏微小抖动下会误吞 click（v3.1.1 胶囊打不开的原因）。
+    // 改为在胶囊 mouseup 时按位移判定：没怎么动 = 点击展开，动了 = 拖拽结束。
+    let isDragging = false, startX, startY, initLeft, initTop;
     dragBar.onmousedown = ball.onmousedown = (e) => {
-      isDragging = true; dragMoved = 0; dragInProgress = true;
+      isDragging = true; dragInProgress = true;
       startX = e.clientX; startY = e.clientY;
       const t = panel.style.display !== 'none' ? panel : ball;
       initLeft = t.offsetLeft; initTop = t.offsetTop;
@@ -2214,29 +2217,28 @@ if (window.self === window.top) { // 防 iframe 多次注入，只在顶层运�
       const t = panel.style.display !== 'none' ? panel : ball;
       let nl = initLeft + e.clientX - startX;
       const nt = initTop + e.clientY - startY;
-      dragMoved = Math.max(dragMoved, Math.abs(e.clientX - startX) + Math.abs(e.clientY - startY));
       // 左右边缘吸附：进入边缘 44px 范围就吸附到 12px 边距
       if (nl < 44) nl = 12;
       if (window.innerWidth - nl - t.offsetWidth < 44) nl = window.innerWidth - t.offsetWidth - 12;
       t.style.left = nl + 'px';
       t.style.top = Math.max(0, Math.min(nt, window.innerHeight - 40)) + 'px';
     };
-    document.onmouseup = () => {
-      if (isDragging && dragMoved > 4) {
-        // 拖拽结束的 mouseup 会跟着一次 click，抑制掉避免胶囊误展开
-        suppressClick = true;
-        setTimeout(() => { suppressClick = false; }, 0);
-      }
+    document.onmouseup = (e) => {
+      const wasDragging = isDragging;
       isDragging = false;
       dragInProgress = false;
+      if (!wasDragging) return;
       const t = panel.style.display !== 'none' ? panel : ball;
+      // 胶囊上松手且几乎没移动 → 视为点击展开（不依赖 click 事件）
+      if (t === ball
+        && Math.abs(e.clientX - startX) <= 6
+        && Math.abs(e.clientY - startY) <= 6) {
+        expandPanel(true);
+        return;
+      }
       snapToEdge(t);
     };
     document.getElementById('uooc-min-btn').onclick = () => minimizePanel();
-    ball.onclick = () => {
-      if (suppressClick) return;
-      expandPanel(true);
-    };
 
     // ---- 考试页精简：隐藏挂机/视频相关控件 ----
     if (isExamPage()) {
