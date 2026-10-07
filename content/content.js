@@ -45,7 +45,8 @@ if (window.self === window.top) { // 防 iframe 多次注入，只在顶层运�
     ready: null,
     init() {
       this.ready = chrome.storage.local.get(null)
-        .then((items) => Object.assign(this.cache, items));
+        .then((items) => Object.assign(this.cache, items))
+        .catch((e) => console.warn('[UOOC助手Pro] 存储读取失败（已降级继续）:', e));
       // popup / options 改动实时同步到面板
       chrome.storage.onChanged.addListener((changes, area) => {
         if (area !== 'local') return;
@@ -54,7 +55,12 @@ if (window.self === window.top) { // 防 iframe 多次注入，只在顶层运�
       });
     },
     get(k, d) { return this.cache[k] === undefined ? d : this.cache[k]; },
-    set(obj) { Object.assign(this.cache, obj); return chrome.storage.local.set(obj); }
+    set(obj) {
+      Object.assign(this.cache, obj);
+      // 内部消化失败：存储写入异常不允许变成未处理的 Promise 拒绝
+      return chrome.storage.local.set(obj)
+        .catch((e) => console.warn('[UOOC助手Pro] 存储写入失败（已降级继续）:', e));
+    }
   };
   Store.init();
 
@@ -75,6 +81,22 @@ if (window.self === window.top) { // 防 iframe 多次注入，只在顶层运�
   const wait = (ms) => new Promise((r) => setTimeout(r, ms));
 
   console.log('[UOOC助手Pro] content script 已加载:', location.href);
+
+  // ==================== 3.5 异步兜底网 ====================
+  // 任何来自本扩展的未处理 Promise 拒绝（"Uncaught (in promise)"）只降级为一条
+  // console 日志，绝不冒泡成 chrome://extensions 错误页条目。
+  // 历史背景：v3.1.1/3.1.2 的 bindToggle 未判空，缺控件时抛错经 init 的 Promise 链
+  // 上报为 "Uncaught (in promise) TypeError: ... addEventListener"；此网从结构上封死。
+  // ⚠️ 只拦截"堆栈属于本扩展"的拒绝：页面自身与其他扩展的错误照常上报，不做背锅侠。
+  let _uoocSelfUrl = 'content/content.js';
+  try { _uoocSelfUrl = chrome.runtime.getURL('content/content.js'); } catch (e) { /* 上下文刚失效等极端情况 */ }
+  window.addEventListener('unhandledrejection', (e) => {
+    const r = e && e.reason;
+    const s = String((r && (r.stack || r.message)) || r || '');
+    if (!s.includes(_uoocSelfUrl)) return; // 不是本扩展的异常：不动
+    try { e.preventDefault(); } catch (err) { /* 忽略 */ }
+    console.warn('[UOOC助手Pro] 已拦截未处理的异步异常（不影响使用）:', r);
+  });
 
   // ==================== 4. 日志（面板未创建前进缓冲区；按前缀分级上色） ====================
   const logBuf = [];
@@ -163,7 +185,7 @@ if (window.self === window.top) { // 防 iframe 多次注入，只在顶层运�
       //    那种 hidden 的播完不能触发跳章。
       const other = currentVideo();
       if (other && other !== v) return;
-      if (Store.get('continueOn', true)) navigate('视频播完');
+      if (Store.get('continueOn', true)) navigate('视频播完').catch((e) => console.warn('[UOOC助手Pro] 跳转异常（已拦截）:', e));
       else log('⏹ 视频播完（连播未勾选，不自动跳转）');
     });
 
@@ -740,6 +762,15 @@ if (window.self === window.top) { // 防 iframe 多次注入，只在顶层运�
     if (wakeLock) { wakeLock.release().catch(() => {}); wakeLock = null; }
     updateEngineBtn();
     log('⏹ 引擎已停止');
+  }
+
+  // 启动引擎的统一安全入口：吞掉异步拒绝，只记日志。
+  // startEngine 是 async，所有调用点（面板按钮 / 停靠条按钮 / 自动续跑）都必须经此进入，
+  // 否则任何内部异常都会变成 "Uncaught (in promise)"。
+  function safeStartEngine(auto) {
+    return startEngine(auto).catch((e) => {
+      console.warn('[UOOC助手Pro] 引擎启动异常（已拦截，不影响页面）:', e);
+    });
   }
 
   function updateEngineBtn() {
@@ -2042,7 +2073,7 @@ if (window.self === window.top) { // 防 iframe 多次注入，只在顶层运�
       const startBtn2 = dock.querySelector('#uooc-dock-start');
       const toggleBtn = dock.querySelector('#uooc-dock-toggle');
       const ticker = dock.querySelector('#uooc-dock-ticker');
-      if (startBtn2) startBtn2.addEventListener('click', () => (engineStarted ? stopEngine() : startEngine(false)));
+      if (startBtn2) startBtn2.addEventListener('click', () => (engineStarted ? stopEngine() : safeStartEngine(false)));
       if (toggleBtn) toggleBtn.addEventListener('click', () => { if (panelIsVisible()) minimizePanel(); else expandPanel(true); });
       if (ticker) {
         ticker.addEventListener('click', () => expandPanel(true));
@@ -2393,7 +2424,7 @@ if (window.self === window.top) { // 防 iframe 多次注入，只在顶层运�
       log('🧹 已清理遮罩、解锁页面并尝试恢复播放');
     });
 
-    on('uooc-start-btn', () => (engineStarted ? stopEngine() : startEngine(false)));
+    on('uooc-start-btn', () => (engineStarted ? stopEngine() : safeStartEngine(false)));
 
     on('uooc-set-btn', openLLMSettings);
     on('uooc-llm-set', openLLMSettings);
@@ -2711,7 +2742,10 @@ if (window.self === window.top) { // 防 iframe 多次注入，只在顶层运�
       const disc = discussionRoute();
       const discByName = /讨论/.test(activeNameQuick());
       if (engineStarted && (disc.active || discByName) && Store.get('discussionOn', true)) {
-        discussionTick(disc);
+        // discussionTick 是 async 且不 await：内部虽自带 try/catch，
+        // 仍补一层 catch 防止未来改动引入未处理的 Promise 拒绝
+        discussionTick(disc).catch((e) =>
+          console.warn('[UOOC助手Pro] 讨论流程异常（已拦截）:', e));
         if (discState && discState.skip) {
           discState.skip = false; // LLM 未配置 / 发帖冷却中：放行本轮，走下面的普通跨越
         } else if (!(discState && discState.done)) {
@@ -2780,7 +2814,7 @@ if (window.self === window.top) { // 防 iframe 多次注入，只在顶层运�
 
       // 弹窗期间：专心解题，不强行续播（没答完题本来也不该继续计时）
       if (isPopActive) {
-        if (solvePopup) handlePopupQuiz(popBox);
+        if (solvePopup) handlePopupQuiz(popBox).catch((e) => console.warn('[UOOC助手Pro] 弹窗处理异常（已拦截）:', e));
         return;
       }
 
@@ -2832,7 +2866,7 @@ if (window.self === window.top) { // 防 iframe 多次注入，只在顶层运�
       // 🌟 当前是大考但已打勾 -> 解除封印，自动前进
       if ((looksLikeQuiz || pageLevelQuestion) && isCompleted && !isJumping) {
         log('✅ 检测到大考已提交（绿勾亮起），自动继续前进...');
-        navigate('大考已完结跳过');
+        navigate('大考已完结跳过').catch((e) => console.warn('[UOOC助手Pro] 跳转异常（已拦截）:', e));
         return;
       }
 
@@ -2868,7 +2902,7 @@ if (window.self === window.top) { // 防 iframe 多次注入，只在顶层运�
             log(isAttachment
               ? '⏭️ 确认当前为附件/过渡页，执行安全跨越...'
               : '⏭️ 当前小节无视频内容（文本/文档等），自动跳过...');
-            navigate(isAttachment ? '附件跳过' : '无视频内容跳过');
+            navigate(isAttachment ? '附件跳过' : '无视频内容跳过').catch((e) => console.warn('[UOOC助手Pro] 跳转异常（已拦截）:', e));
             noVideoTimer = 0;
           }
         }
@@ -2912,7 +2946,7 @@ if (window.self === window.top) { // 防 iframe 多次注入，只在顶层运�
     if (isExamPage()) return; // 考试页：只要面板（LLM 答题 + 复制），不挂机不隐身
 
     bindKeyboardEvents();
-    if (Store.get('engineRunning', false)) startEngine(true);
+    if (Store.get('engineRunning', false)) safeStartEngine(true);
 
     console.log('[UOOC助手Pro] 初始化完成');
   })().catch((e) => {

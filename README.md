@@ -4,7 +4,7 @@
 
 _优课在线（UOOC / 优课联盟）全自动挂机 + AI 答题 · 浏览器扩展（Manifest V3）_
 
-![version](https://img.shields.io/badge/version-3.2.1-blue)
+![version](https://img.shields.io/badge/version-3.2.2-blue)
 ![chrome](https://img.shields.io/badge/Chrome%20%7C%20Edge-MV3-brightgreen)
 ![license](https://img.shields.io/badge/license-MIT-orange)
 
@@ -117,6 +117,12 @@ _优课在线（UOOC / 优课联盟）全自动挂机 + AI 答题 · 浏览器�
 任何刷课行为都有风险，请自行评估。本工具仅作技术学习交流用途。
 
 ## 📜 更新日志
+
+### v3.2.2
+- **全局异步兜底网**：`unhandledrejection` 监听（仅拦截堆栈属于本扩展的拒绝，页面与其他扩展的错误照常上报、不做背锅侠）——任何未预料的异步异常只进 console，**不再冒泡成扩展错误页条目**
+- **异步入口全部补 catch**：`startEngine`（统一经 `safeStartEngine`）、`discussionTick`、`navigate`（三处调用点）、`handlePopupQuiz`；初始化整链已有 catch 兜底
+- **存储读写自愈**：`chrome.storage.local` 读取/写入失败降级记录，不再产生未处理的 Promise 拒绝
+- **关于错误页历史条目**：chrome://extensions 错误页展示的是「记录时的行号 + 当前文件内容」的组合。若展开高亮那行看不出如何能抛该错误（比如只是一个孤立的 `}`），说明它是旧版本留下的历史条目——点「全部清除」即可，v3.2.2 起不会再产生新的
 
 ### v3.2.1
 - **修复：扩展错误页反复出现 `Cannot read properties of null (reading 'addEventListener')`**。站点 DOM 在个别时序（标题栏重渲染、页面资源异常等）下会短暂缺少控件元素，此前停靠条挂载与收起胶囊的绑定未做存在性校验，缺元素即抛异常
