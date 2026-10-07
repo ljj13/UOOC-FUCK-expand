@@ -76,15 +76,40 @@ if (window.self === window.top) { // 防 iframe 多次注入，只在顶层运�
 
   console.log('[UOOC助手Pro] content script 已加载:', location.href);
 
-  // ==================== 4. 日志（面板未创建前进缓冲区） ====================
+  // ==================== 4. 日志（面板未创建前进缓冲区；按前缀分级上色） ====================
   const logBuf = [];
+
+  function logClassOf(m) {
+    if (/^[✅🎉🎯🔥✓]/u.test(m)) return 'log-success';
+    if (/^[⚠🛑]/u.test(m)) return 'log-warning';
+    if (/^[❌⛔×]/u.test(m)) return 'log-danger';
+    if (/^[🔄🤖📡🗳🔁]/u.test(m)) return 'log-info';
+    return '';
+  }
+
+  function appendLogLine(box, m) {
+    const d = document.createElement('div');
+    const cls = logClassOf(m);
+    const sp = cls ? m.indexOf(' ') : -1;
+    if (cls && sp > 0 && sp <= 4) {
+      // 状态符号带色，正文保持浅灰
+      const sym = document.createElement('span');
+      sym.className = cls;
+      sym.textContent = m.slice(0, sp);
+      d.appendChild(sym);
+      d.appendChild(document.createTextNode(m.slice(sp)));
+    } else {
+      d.textContent = m;
+    }
+    box.appendChild(d);
+    box.scrollTop = box.scrollHeight;
+  }
+
   function log(m) {
     const l = document.getElementById('uooc-log');
     if (l) {
-      const d = document.createElement('div');
-      d.textContent = '> ' + m;
-      l.appendChild(d);
-      l.scrollTop = l.scrollHeight;
+      if (l.dataset.empty === '1') { l.innerHTML = ''; l.dataset.empty = '0'; }
+      appendLogLine(l, m);
     } else {
       logBuf.push(m);
     }
@@ -712,9 +737,20 @@ if (window.self === window.top) { // 防 iframe 多次注入，只在顶层运�
 
   function updateEngineBtn() {
     const b = document.getElementById('uooc-start-btn');
-    if (!b) return;
-    if (engineStarted) { b.className = 'running'; b.innerText = '⏹ 停止挂机'; }
-    else { b.className = ''; b.innerText = '🚀 点火启动'; }
+    if (b) {
+      b.className = engineStarted ? 'running' : '';
+      b.innerHTML = (engineStarted ? ICONS.stop : ICONS.play)
+        + '<span>' + (engineStarted ? '停止挂机' : '启动挂机') + '</span>';
+    }
+    const dot = document.getElementById('uooc-header-dot');
+    if (dot) dot.classList.toggle('on', engineStarted);
+    const st = document.getElementById('uooc-engine-state-text');
+    if (st) {
+      st.textContent = engineStarted ? '运行中' : '未启动';
+      st.classList.toggle('on', engineStarted);
+    }
+    const ball = document.getElementById('uooc-min-ball');
+    if (ball) ball.classList.toggle('running', engineStarted);
   }
 
   // ==================== 9. LLM 模块 ====================
@@ -1342,29 +1378,109 @@ if (window.self === window.top) { // 防 iframe 多次注入，只在顶层运�
 
   // ==================== 11. 悬浮控制台 UI ====================
 
+  // 内嵌 monochrome SVG 图标（不加载外部资源；日志中的 emoji 属于运行内容，不受此限制）
+  const _svg = (inner, filled) => `<svg viewBox="0 0 24 24" aria-hidden="true" ${filled
+    ? 'fill="currentColor" stroke="none"'
+    : 'fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"'}>${inner}</svg>`;
+  const ICONS = {
+    gear: _svg('<circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z"/>'),
+    minus: _svg('<line x1="5" y1="12" x2="19" y2="12"/>'),
+    refresh: _svg('<polyline points="23 4 23 10 17 10"/><polyline points="1 20 1 14 7 14"/><path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"/>'),
+    tool: _svg('<path d="M14.7 6.3a1 1 0 0 0 0 1.4l1.6 1.6a1 1 0 0 0 1.4 0l3.77-3.77a6 6 0 0 1-7.94 7.94l-6.91 6.91a2.12 2.12 0 0 1-3-3l6.91-6.91a6 6 0 0 1 7.94-7.94l-3.76 3.76z"/>'),
+    copy: _svg('<rect x="9" y="9" width="13" height="13" rx="2" ry="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/>'),
+    spark: _svg('<path d="M12 2.5l2.1 5.9 5.9 2.1-5.9 2.1L12 18.5l-2.1-5.9L4 10.5l5.9-2.1L12 2.5z"/>', true),
+    play: _svg('<polygon points="6 3 20 12 6 21 6 3"/>', true),
+    stop: _svg('<rect x="5.5" y="5.5" width="13" height="13" rx="2.5"/>', true),
+    check: _svg('<polyline points="20 6 9 17 4 12"/>'),
+    x: _svg('<line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/>'),
+  };
+
   function buildPanel() {
     if (document.getElementById('uooc-video-panel')) return;
 
     const css = `
-        #uooc-video-panel { position:fixed; top:20px; left:20px; width:216px; background:rgba(20,20,20,0.88); color:#fff; z-index:2147483647; pointer-events:auto; border-radius:8px; box-shadow:0 4px 15px rgba(0,0,0,0.5); border:1px solid #3498db; backdrop-filter:blur(5px); font-family:sans-serif; display:block; }
-        #uooc-drag-bar { padding:8px 12px; background:#2980b9; cursor:move; border-radius:8px 8px 0 0; font-size:12px; font-weight:bold; display:flex; justify-content:space-between; align-items:center; user-select:none; }
-        #uooc-drag-bar .uooc-bar-icons span { cursor:pointer; margin-left:6px; }
-        #uooc-min-ball { position:fixed; top:20px; left:20px; width:40px; height:40px; background:#2980b9; border-radius:50%; z-index:2147483647; pointer-events:auto; display:none; align-items:center; justify-content:center; cursor:move; box-shadow:0 4px 10px rgba(0,0,0,0.5); font-size:16px; user-select:none; border:2px solid #fff; }
-        #uooc-start-btn { flex:1; padding:8px 0; background:#e74c3c; color:white; border:none; border-radius:4px; font-weight:bold; cursor:pointer; transition:0.3s; font-size:12px; }
-        #uooc-start-btn:hover { background:#c0392b; }
-        #uooc-start-btn.running { background:#27ae60; }
-        #uooc-start-btn.running:hover { background:#219a52; }
-        #uooc-refresh-btn { width:35px; background:#f39c12; color:white; border:none; border-radius:4px; cursor:pointer; font-weight:bold; }
-        #uooc-unlock-btn { width:35px; background:#8e44ad; color:white; border:none; border-radius:4px; cursor:pointer; font-weight:bold; }
-        .uooc-row { display:flex; align-items:center; gap:7px; margin-bottom:6px; font-size:12px; color:#ccc; flex-wrap:wrap; }
-        .uooc-row label { display:flex; align-items:center; gap:3px; cursor:pointer; user-select:none; }
-        .uooc-row input[type=checkbox] { width:12px; height:12px; margin:0; cursor:pointer; }
-        #uooc-rate-value { background:#111; color:#0f0; border:1px solid #333; border-radius:3px; font-size:11px; padding:1px 2px; cursor:pointer; }
-        #uooc-llm-set { cursor:pointer; font-size:14px; }
-        #uooc-answer-btn { flex:1; padding:4px 10px; font-size:12px; background:linear-gradient(135deg,#667eea 0%,#764ba2 100%); color:white; border:none; border-radius:4px; cursor:pointer; transition:all 0.3s; }
-        #uooc-copy-btn { flex:1; padding:4px 10px; font-size:12px; background:#34495e; color:#ecf0f1; border:1px solid #46637f; border-radius:4px; cursor:pointer; }
-        #uooc-log { height:64px; background:#111; color:#0f0; overflow-y:auto; padding:5px; border-radius:4px; font-family:monospace; font-size:10px; line-height:1.4; }
+        #uooc-video-panel { position:fixed; top:20px; left:20px; width:264px; background:rgba(12,17,27,.96); backdrop-filter:blur(14px) saturate(130%); color:#f8fafc; z-index:2147483647; pointer-events:auto; border:1px solid rgba(148,163,184,.14); border-radius:12px; box-shadow:0 18px 45px rgba(0,0,0,.28), 0 2px 8px rgba(0,0,0,.22); font-family:Inter,ui-sans-serif,system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI","Microsoft YaHei",sans-serif; display:block; }
+        #uooc-video-panel * { box-sizing:border-box; }
+        #uooc-drag-bar { display:flex; align-items:center; gap:9px; padding:9px 12px; cursor:move; user-select:none; border-bottom:1px solid rgba(148,163,184,.14); }
+        #uooc-header-dot { flex:none; width:9px; height:9px; border-radius:50%; background:#64748b; transition:background .2s ease; }
+        #uooc-header-dot.on { background:#22c55e; box-shadow:0 0 0 4px rgba(34,197,94,.10); animation:uooc-pulse 2.4s ease-in-out infinite; }
+        @keyframes uooc-pulse { 0%,100% { box-shadow:0 0 0 3px rgba(34,197,94,.08); } 50% { box-shadow:0 0 0 6px rgba(34,197,94,.16); } }
+        @media (prefers-reduced-motion: reduce) { #uooc-header-dot.on { animation:none; } }
+        .uooc-header-text { flex:1; min-width:0; }
+        .uooc-header-title { font-size:13px; font-weight:600; line-height:1.25; color:#f8fafc; }
+        .uooc-header-sub { font-size:10px; color:#7f8da3; line-height:1.3; }
+        .uooc-bar-icons { display:flex; align-items:center; gap:2px; }
+        .uooc-bar-icons span { display:flex; align-items:center; justify-content:center; width:24px; height:24px; border-radius:6px; cursor:pointer; color:#7f8da3; transition:background 140ms ease, color 140ms ease; }
+        .uooc-bar-icons span:hover { background:rgba(148,163,184,.12); color:#e2e8f0; }
+        .uooc-bar-icons svg, .uooc-sec-gear svg { width:15px; height:15px; }
+        #uooc-panel-body { padding:10px 12px 12px; }
+        .uooc-sec-head { display:flex; align-items:center; justify-content:space-between; margin:2px 0 8px; }
+        .uooc-sec-title { font-size:11px; font-weight:600; color:#7f8da3; letter-spacing:.4px; }
+        .uooc-sec-status { font-size:10px; color:#64748b; transition:color .2s ease; }
+        .uooc-sec-status.on { color:#22c55e; }
+        .uooc-sec-gear { display:flex; align-items:center; justify-content:center; width:22px; height:22px; border-radius:6px; cursor:pointer; color:#7f8da3; transition:background 140ms ease, color 140ms ease; }
+        .uooc-sec-gear:hover { background:rgba(148,163,184,.12); color:#e2e8f0; }
+        #uooc-helper-rows, #uooc-ai-sec, .uooc-log-sec { margin-top:10px; padding-top:8px; border-top:1px solid rgba(148,163,184,.10); }
+        #uooc-start-btn { display:flex; align-items:center; justify-content:center; gap:7px; width:100%; height:34px; background:#3b82f6; color:#fff; border:none; border-radius:7px; font-size:12px; font-weight:600; cursor:pointer; font-family:inherit; transition:background 140ms ease, border-color 140ms ease, transform 80ms ease; }
+        #uooc-start-btn:hover { background:#4b8df8; }
+        #uooc-start-btn:active { transform:translateY(1px); }
+        #uooc-start-btn:focus-visible { outline:none; box-shadow:0 0 0 2px #0c111b, 0 0 0 4px rgba(59,130,246,.55); }
+        #uooc-start-btn.running { background:rgba(239,68,68,.08); border:1px solid rgba(239,68,68,.24); color:#f87171; }
+        #uooc-start-btn.running:hover { background:rgba(239,68,68,.14); }
+        #uooc-start-btn svg { width:12px; height:12px; }
+        .uooc-engine-sub { display:flex; gap:7px; margin-top:7px; }
+        #uooc-refresh-btn, #uooc-unlock-btn { flex:1; display:flex; align-items:center; justify-content:center; gap:6px; height:28px; background:transparent; color:#cbd5e1; border:1px solid rgba(148,163,184,.18); border-radius:7px; font-size:11px; font-weight:500; cursor:pointer; font-family:inherit; transition:background 140ms ease, border-color 140ms ease, transform 80ms ease; }
+        #uooc-refresh-btn:hover, #uooc-unlock-btn:hover { background:rgba(148,163,184,.08); border-color:rgba(148,163,184,.28); }
+        #uooc-refresh-btn:active, #uooc-unlock-btn:active { transform:translateY(1px); }
+        #uooc-refresh-btn:focus-visible, #uooc-unlock-btn:focus-visible { outline:none; box-shadow:0 0 0 2px #0c111b, 0 0 0 4px rgba(59,130,246,.55); }
+        #uooc-refresh-btn svg, #uooc-unlock-btn svg { width:12px; height:12px; }
+        .uooc-setting { display:flex; align-items:center; gap:8px; min-height:38px; padding:5px 6px; margin:0 -6px; border-radius:8px; cursor:pointer; user-select:none; transition:background 140ms ease; }
+        .uooc-setting:hover { background:rgba(148,163,184,.07); }
+        .uooc-setting-text { flex:1; min-width:0; display:flex; flex-direction:column; gap:1px; }
+        .uooc-setting-title { font-size:12px; color:#f8fafc; line-height:1.35; }
+        .uooc-setting-desc { font-size:9.5px; color:#7f8da3; line-height:1.3; }
+        .uooc-setting input[type=checkbox] { position:absolute; opacity:0; width:0; height:0; }
+        .uooc-switch { flex:none; width:30px; height:18px; border-radius:9px; background:#334155; position:relative; transition:background 160ms ease; }
+        .uooc-switch::after { content:''; position:absolute; top:2px; left:2px; width:14px; height:14px; border-radius:50%; background:#f8fafc; box-shadow:0 1px 2px rgba(0,0,0,.35); transition:transform 160ms ease; }
+        .uooc-setting input:checked + .uooc-switch { background:#3b82f6; }
+        .uooc-setting input:checked + .uooc-switch::after { transform:translateX(12px); }
+        .uooc-setting input:focus-visible + .uooc-switch { box-shadow:0 0 0 2px #0c111b, 0 0 0 4px rgba(59,130,246,.55); }
+        .uooc-select { flex:none; width:64px; height:24px; padding:0 4px; background:#151e2d; color:#cbd5e1; border:1px solid rgba(148,163,184,.18); border-radius:6px; font-size:11px; font-family:inherit; cursor:pointer; }
+        .uooc-select:hover { border-color:rgba(148,163,184,.28); }
+        .uooc-select:focus-visible { outline:none; border-color:#3b82f6; box-shadow:0 0 0 3px rgba(59,130,246,.13); }
+        #uooc-answer-btn, #uooc-copy-btn { display:flex; align-items:center; justify-content:center; gap:7px; width:100%; height:32px; border-radius:7px; font-size:12px; font-weight:500; cursor:pointer; font-family:inherit; transition:background 140ms ease, border-color 140ms ease, transform 80ms ease; }
+        #uooc-answer-btn { background:#3b82f6; color:#fff; border:none; margin-top:8px; }
+        #uooc-answer-btn:hover { background:#4b8df8; }
+        #uooc-answer-btn:active { transform:translateY(1px); }
+        #uooc-answer-btn:focus-visible { outline:none; box-shadow:0 0 0 2px #0c111b, 0 0 0 4px rgba(59,130,246,.55); }
+        #uooc-answer-btn:disabled { cursor:default; }
+        #uooc-answer-btn.ans-loading { opacity:.85; }
+        #uooc-answer-btn.ans-ok { background:rgba(34,197,94,.12); color:#4ade80; }
+        #uooc-answer-btn.ans-ok:hover { background:rgba(34,197,94,.18); }
+        #uooc-answer-btn.ans-err { background:rgba(239,68,68,.12); color:#f87171; }
+        #uooc-answer-btn.ans-err:hover { background:rgba(239,68,68,.18); }
+        #uooc-answer-btn svg, #uooc-copy-btn svg { width:13px; height:13px; }
+        .uooc-spinner { width:12px; height:12px; border:2px solid rgba(255,255,255,.25); border-top-color:#fff; border-radius:50%; animation:uooc-spin .8s linear infinite; }
+        @keyframes uooc-spin { to { transform:rotate(360deg); } }
+        #uooc-copy-btn { background:transparent; color:#cbd5e1; border:1px solid rgba(148,163,184,.18); margin-top:7px; }
+        #uooc-copy-btn:hover { background:rgba(148,163,184,.08); border-color:rgba(148,163,184,.28); }
+        #uooc-copy-btn:active { transform:translateY(1px); }
+        #uooc-copy-btn:focus-visible { outline:none; box-shadow:0 0 0 2px #0c111b, 0 0 0 4px rgba(59,130,246,.55); }
+        .uooc-log-head-clear { font-size:10px; color:#7f8da3; cursor:pointer; padding:2px 6px; border-radius:5px; user-select:none; transition:background 140ms ease, color 140ms ease; }
+        .uooc-log-head-clear:hover { background:rgba(148,163,184,.10); color:#cbd5e1; }
+        #uooc-log { height:92px; overflow-y:auto; background:#0a101a; border:1px solid rgba(148,163,184,.14); border-radius:8px; padding:7px 8px; font-family:ui-monospace,"Cascadia Code",Consolas,monospace; font-size:10px; line-height:1.55; color:#9eacc0; }
         #uooc-log div { word-break:break-all; }
+        #uooc-log .log-success { color:#86efac; }
+        #uooc-log .log-warning { color:#fcd34d; }
+        #uooc-log .log-danger { color:#fca5a5; }
+        #uooc-log .log-info { color:#93c5fd; }
+        #uooc-log::-webkit-scrollbar { width:4px; }
+        #uooc-log::-webkit-scrollbar-track { background:transparent; }
+        #uooc-log::-webkit-scrollbar-thumb { background:rgba(148,163,184,.25); border-radius:2px; }
+        #uooc-min-ball { position:fixed; top:20px; left:20px; width:40px; height:40px; background:rgba(15,23,42,.96); border:1px solid rgba(148,163,184,.18); border-radius:12px; z-index:2147483647; pointer-events:auto; display:none; align-items:center; justify-content:center; cursor:move; user-select:none; box-shadow:0 10px 30px rgba(0,0,0,.30); }
+        .uooc-ball-u { font-size:15px; font-weight:700; color:#cbd5e1; }
+        .uooc-ball-dot { display:none; position:absolute; top:-2px; right:-2px; width:10px; height:10px; border-radius:50%; background:#22c55e; border:2px solid #0b0f17; }
+        #uooc-min-ball.running .uooc-ball-dot { display:block; }
     `;
     const style = document.createElement('style');
     style.innerHTML = css;
@@ -1374,19 +1490,38 @@ if (window.self === window.top) { // 防 iframe 多次注入，只在顶层运�
     div.innerHTML = `
         <div id="uooc-video-panel">
           <div id="uooc-drag-bar">
-            <span>🤖 UOOC助手 Pro</span>
-            <span class="uooc-bar-icons"><span id="uooc-set-btn" title="设置（API 配置）">⚙️</span><span id="uooc-min-btn" title="收起">➖</span></span>
+            <span id="uooc-header-dot"></span>
+            <div class="uooc-header-text">
+              <div class="uooc-header-title">UOOC Assistant</div>
+              <div class="uooc-header-sub">Control Center</div>
+            </div>
+            <div class="uooc-bar-icons">
+              <span id="uooc-set-btn" title="设置（API 配置）">${ICONS.gear}</span>
+              <span id="uooc-min-btn" title="收起">${ICONS.minus}</span>
+            </div>
           </div>
-          <div style="padding:10px;">
-            <div id="uooc-engine-row" style="display:flex; gap:5px; margin-bottom:7px;">
-              <button id="uooc-start-btn" title="全自动挂机：接管视频、秒杀弹窗、自动跳章节">🚀 点火启动</button>
-              <button id="uooc-refresh-btn" title="强制刷新网页重启兜底">🔄</button>
-              <button id="uooc-unlock-btn" title="急救：清理卡死的弹窗遮罩，恢复页面点击与播放">🧹</button>
+          <div id="uooc-panel-body">
+            <div id="uooc-engine-row">
+              <div class="uooc-sec-head">
+                <span class="uooc-sec-title">挂机引擎</span>
+                <span class="uooc-sec-status" id="uooc-engine-state-text">未启动</span>
+              </div>
+              <button id="uooc-start-btn" title="全自动挂机：接管视频、秒杀弹窗、自动跳章节">${ICONS.play}<span>启动挂机</span></button>
+              <div class="uooc-engine-sub">
+                <button id="uooc-refresh-btn" title="强制刷新网页重启兜底">${ICONS.refresh}<span>刷新页面</span></button>
+                <button id="uooc-unlock-btn" title="急救：清理卡死的弹窗遮罩，恢复页面点击与播放">${ICONS.tool}<span>页面急救</span></button>
+              </div>
             </div>
             <div id="uooc-helper-rows">
-              <div class="uooc-row">
-                <label><input type="checkbox" id="uooc-rate-on">倍速</label>
-                <select id="uooc-rate-value">
+              <div class="uooc-sec-head"><span class="uooc-sec-title">视频助手</span></div>
+              <label class="uooc-setting" title="自动播放并拦截站点暂停（空格键切换）">
+                <span class="uooc-setting-text"><span class="uooc-setting-title">播放托管</span><span class="uooc-setting-desc">自动接管视频播放</span></span>
+                <input type="checkbox" id="uooc-play-on">
+                <span class="uooc-switch"></span>
+              </label>
+              <label class="uooc-setting" title="托管播放速度">
+                <span class="uooc-setting-text"><span class="uooc-setting-title">倍速</span><span class="uooc-setting-desc">托管播放速度</span></span>
+                <select id="uooc-rate-value" class="uooc-select">
                   <option value="1">1.0x</option>
                   <option value="1.25">1.25x</option>
                   <option value="1.5">1.5x</option>
@@ -1394,27 +1529,55 @@ if (window.self === window.top) { // 防 iframe 多次注入，只在顶层运�
                   <option value="2.5">2.5x</option>
                   <option value="3">3.0x</option>
                 </select>
-                <label><input type="checkbox" id="uooc-mute-on">静音</label>
+                <input type="checkbox" id="uooc-rate-on">
+                <span class="uooc-switch"></span>
+              </label>
+              <label class="uooc-setting" title="自动静音视频">
+                <span class="uooc-setting-text"><span class="uooc-setting-title">静音</span><span class="uooc-setting-desc">自动静音视频</span></span>
+                <input type="checkbox" id="uooc-mute-on">
+                <span class="uooc-switch"></span>
+              </label>
+              <label class="uooc-setting" title="播完自动跳下一节">
+                <span class="uooc-setting-text"><span class="uooc-setting-title">连续播放</span><span class="uooc-setting-desc">完成后进入下一节</span></span>
+                <input type="checkbox" id="uooc-continue-on">
+                <span class="uooc-switch"></span>
+              </label>
+              <label class="uooc-setting" title="视频弹窗小题自动作答（内存嗅探 → LLM采样投票 → 穷举兜底）">
+                <span class="uooc-setting-text"><span class="uooc-setting-title">弹窗秒答</span><span class="uooc-setting-desc">自动处理视频小题</span></span>
+                <input type="checkbox" id="uooc-popup-on">
+                <span class="uooc-switch"></span>
+              </label>
+            </div>
+            <div id="uooc-ai-sec">
+              <div class="uooc-sec-head">
+                <span class="uooc-sec-title">AI 答题</span>
+                <span id="uooc-llm-set" class="uooc-sec-gear" title="配置AI答题参数">${ICONS.gear}</span>
               </div>
-              <div class="uooc-row">
-                <label title="自动播放并拦截站点暂停（空格键切换）"><input type="checkbox" id="uooc-play-on">播放</label>
-                <label title="播完自动跳下一节"><input type="checkbox" id="uooc-continue-on">连播</label>
-                <label title="视频弹窗小题自动作答（内存嗅探 → LLM采样投票 → 穷举兜底）"><input type="checkbox" id="uooc-popup-on">弹窗秒答</label>
+              <div id="uooc-llm-row">
+                <label class="uooc-setting">
+                  <span class="uooc-setting-text"><span class="uooc-setting-title">LLM 答题</span><span class="uooc-setting-desc">使用已配置的大模型</span></span>
+                  <input type="checkbox" id="uooc-llm-on">
+                  <span class="uooc-switch"></span>
+                </label>
+                <label class="uooc-setting" title="学习页章节测验自动交卷：重做错题 + 只爆破错题（/exam/考试页不受影响，永不自动交卷）">
+                  <span class="uooc-setting-text"><span class="uooc-setting-title">闯关模式</span><span class="uooc-setting-desc">只重做 / 爆破错题</span></span>
+                  <input type="checkbox" id="uooc-gate-on">
+                  <span class="uooc-switch"></span>
+                </label>
               </div>
+              <button id="uooc-answer-btn" title="提取试卷题目并用 LLM 投票作答">${ICONS.spark}<span>开始 AI 答题</span></button>
+              <button id="uooc-copy-btn" title="在已提交的测验回顾页，复制题目与答案到剪切板">${ICONS.copy}<span>复制题目答案</span></button>
             </div>
-            <div class="uooc-row" id="uooc-llm-row">
-              <span id="uooc-llm-set" title="配置AI答题参数">⚙️</span>
-              <label><input type="checkbox" id="uooc-llm-on">LLM答题</label>
-              <label title="学习页章节测验自动交卷：重做错题 + 只爆破错题（/exam/考试页不受影响，永不自动交卷）"><input type="checkbox" id="uooc-gate-on">闯关</label>
-              <button id="uooc-answer-btn">🤖 开始答题</button>
+            <div class="uooc-log-sec">
+              <div class="uooc-sec-head">
+                <span class="uooc-sec-title">运行日志</span>
+                <span id="uooc-log-clear" class="uooc-log-head-clear" title="清空日志（不影响运行状态）">清空</span>
+              </div>
+              <div id="uooc-log" data-empty="1">暂无日志</div>
             </div>
-            <div class="uooc-row">
-              <button id="uooc-copy-btn" title="在已提交的测验回顾页，复制题目与答案到剪切板">📋 复制题目答案</button>
-            </div>
-            <div id="uooc-log">等待点火...</div>
           </div>
         </div>
-        <div id="uooc-min-ball" title="展开">🤖</div>
+        <div id="uooc-min-ball" title="展开"><span class="uooc-ball-u">U</span><span class="uooc-ball-dot"></span></div>
     `;
     document.body.appendChild(div);
     flushLog();
@@ -1484,32 +1647,37 @@ if (window.self === window.top) { // 防 iframe 多次注入，只在顶层运�
       updateAnswerBtnState();
     });
 
+    document.getElementById('uooc-log-clear').onclick = () => {
+      const l = document.getElementById('uooc-log');
+      if (l) { l.innerHTML = ''; l.dataset.empty = '1'; }
+    };
+
     document.getElementById('uooc-answer-btn').onclick = async function () {
       if (!Store.get('llmEnabled', false)) {
-        alert('请先勾选"LLM答题"复选框！');
+        alert('请先打开"LLM 答题"开关！');
         return;
       }
       const btn = this;
       btn.disabled = true;
-      btn.innerHTML = '⏳ 正在答题...';
-      btn.style.opacity = '0.7';
+      btn.className = 'ans-loading';
+      btn.innerHTML = '<span class="uooc-spinner"></span><span>正在答题…</span>';
       try {
         await autoAnswerQuiz();
-        btn.innerHTML = '✅ 答题完成';
-        btn.style.background = '#28a745';
+        btn.className = 'ans-ok';
+        btn.innerHTML = ICONS.check + '<span>答题完成</span>';
         setTimeout(() => resetAnswerBtn(btn), 3000);
       } catch (error) {
         console.error(error);
-        btn.innerHTML = '❌ 答题失败';
-        btn.style.background = '#dc3545';
+        btn.className = 'ans-err';
+        btn.innerHTML = ICONS.x + '<span>答题失败</span>';
         setTimeout(() => resetAnswerBtn(btn), 2000);
       }
     };
 
     function resetAnswerBtn(btn) {
       btn.disabled = false;
-      btn.innerHTML = '🤖 开始答题';
-      btn.style.background = 'linear-gradient(135deg, #667eea 0%, #764ba2 100%)';
+      btn.className = '';
+      btn.innerHTML = ICONS.spark + '<span>开始 AI 答题</span>';
       btn.style.opacity = Store.get('llmEnabled', false) ? '1' : '0.5';
     }
 
@@ -1541,7 +1709,7 @@ if (window.self === window.top) { // 防 iframe 多次注入，只在顶层运�
     if (isExamPage()) {
       document.getElementById('uooc-engine-row').style.display = 'none';
       document.getElementById('uooc-helper-rows').style.display = 'none';
-      log('📄 测评页面模式：配置好 API 后点「🤖 开始答题」');
+      log('📄 测评页面模式：配置好 API 后点「开始 AI 答题」');
     }
 
     syncPanelControls();

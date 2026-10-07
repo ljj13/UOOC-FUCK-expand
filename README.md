@@ -4,7 +4,7 @@
 
 _优课在线（UOOC / 优课联盟）全自动挂机 + AI 答题 · 浏览器扩展（Manifest V3）_
 
-![version](https://img.shields.io/badge/version-2.2.0-blue)
+![version](https://img.shields.io/badge/version-2.3.0-blue)
 ![chrome](https://img.shields.io/badge/Chrome%20%7C%20Edge-MV3-brightgreen)
 ![license](https://img.shields.io/badge/license-MIT-orange)
 
@@ -103,6 +103,14 @@ _优课在线（UOOC / 优课联盟）全自动挂机 + AI 答题 · 浏览器�
 任何刷课行为都有风险，请自行评估。本工具仅作技术学习交流用途。
 
 ## 📜 更新日志
+
+### v2.3.0
+- **UI 全线重设计（Control Center）**：悬浮控制台、Popup、设置页统一 Deep Graphite 深色设计语言——分区标题、开关化控件（toggle switch）、内嵌单色 SVG 图标（替代结构性 emoji）、按级别配色的运行日志、引擎状态呼吸灯
+- 新增 `shared/ui.css`：设计令牌与基础组件（按钮 / 开关 / 输入框 / 卡片 / Status Banner），三端共用一套视觉语言
+- Popup 加宽到 320px：引擎与 AI 服务状态一目了然（已配置时直读模型名），快速控制提供全部开关
+- 设置页重做：AI 服务卡片 + 统一 Status Banner + 自动化偏好设置列表 + 「隐私与权限」说明框
+- 悬浮面板加宽到 264px：Settings List 式视频助手（标题 + 描述 + 开关），引擎主按钮蓝=启动 / 红=停止，运行状态由呼吸灯表达
+- 业务逻辑、Storage Key、DOM ID 全部不变，纯视觉层重构
 
 ### v2.2.0
 - **弹窗小题恢复穷举兜底**：嗅探 → LLM 投票 → 穷举三层（弹窗分值低、站点即时判分，穷举代价可接受）

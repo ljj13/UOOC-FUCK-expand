@@ -2,54 +2,109 @@
 <html lang="zh-CN">
 <head>
   <meta charset="UTF-8">
+  <link rel="stylesheet" href="../shared/ui.css">
   <style>
-    body { width: 250px; margin: 0; padding: 12px; font-family: "Microsoft YaHei", sans-serif; font-size: 12px; color: #333; background: #fafafa; }
-    h1 { font-size: 14px; margin: 0 0 10px; color: #2980b9; display: flex; align-items: center; gap: 6px; }
-    .state { background: #fff; border: 1px solid #e0e0e0; border-radius: 6px; padding: 8px 10px; margin-bottom: 10px; line-height: 1.7; }
-    .row { display: flex; align-items: center; gap: 8px; margin-bottom: 8px; }
-    .row label { display: flex; align-items: center; gap: 4px; cursor: pointer; user-select: none; }
-    select { padding: 1px 3px; }
-    .btns { display: flex; gap: 6px; }
-    button { flex: 1; padding: 6px 0; border: none; border-radius: 4px; cursor: pointer; font-size: 12px; background: #2980b9; color: #fff; }
-    button:hover { background: #21688f; }
-    .tip { margin-top: 10px; color: #999; font-size: 11px; line-height: 1.5; }
+    body { width: 320px; }
+    .pp-header {
+      padding: 14px 16px 12px;
+      border-bottom: 1px solid var(--border);
+      background: linear-gradient(135deg, rgba(59, 130, 246, .13), rgba(59, 130, 246, .03));
+    }
+    .pp-title-row { display: flex; align-items: baseline; justify-content: space-between; }
+    .pp-title { font-size: 14px; font-weight: 600; color: var(--text); }
+    .pp-ver { font-size: 10.5px; color: var(--text-muted); }
+    .pp-sub { font-size: 10px; color: var(--text-muted); margin-top: 2px; }
+    .pp-statuses { padding: 6px 16px 8px; border-bottom: 1px solid var(--border); }
+    .pp-section-title {
+      padding: 10px 16px 2px;
+      font-size: 11px;
+      font-weight: 600;
+      color: var(--text-muted);
+      letter-spacing: .4px;
+    }
+    .pp-settings { padding: 0 16px; }
+    .pp-actions { padding: 10px 16px 4px; }
+    .pp-footer {
+      padding: 6px 16px 12px;
+      font-size: 10px;
+      color: var(--text-muted);
+      text-align: center;
+    }
   </style>
 </head>
 <body>
-  <h1>🤖 UOOC 助手 Pro</h1>
-
-  <div class="state">
-    <div id="engine-state">⚪ 引擎状态读取中...</div>
-    <div id="llm-state">⚪ AI 配置读取中...</div>
+  <div class="pp-header">
+    <div class="pp-title-row">
+      <span class="pp-title">UOOC Assistant</span>
+      <span class="pp-ver" id="pp-ver"></span>
+    </div>
+    <div class="pp-sub">Browser Control Center</div>
   </div>
 
-  <div class="row">
-    <label><input type="checkbox" id="rate-on">倍速</label>
-    <select id="rate-value">
-      <option value="1">1.0x</option>
-      <option value="1.25">1.25x</option>
-      <option value="1.5">1.5x</option>
-      <option value="2">2.0x</option>
-      <option value="2.5">2.5x</option>
-      <option value="3">3.0x</option>
-    </select>
-    <label><input type="checkbox" id="mute-on">静音</label>
-  </div>
-  <div class="row">
-    <label><input type="checkbox" id="play-on">播放</label>
-    <label><input type="checkbox" id="continue-on">连播</label>
-    <label><input type="checkbox" id="popup-on">弹窗秒答</label>
-  </div>
-  <div class="row">
-    <label><input type="checkbox" id="llm-on">LLM答题</label>
-    <label title="学习页章节测验自动交卷：重做错题+只爆破错题；考试页不自动交卷"><input type="checkbox" id="gate-on">闯关</label>
+  <div class="pp-statuses">
+    <div class="u-status-row">
+      <span class="u-dot" id="engine-dot"></span>
+      <span class="u-status-label">挂机引擎</span>
+      <span class="u-status-value" id="engine-state">读取中...</span>
+    </div>
+    <div class="u-status-row">
+      <span class="u-dot" id="llm-dot"></span>
+      <span class="u-status-label">AI 服务</span>
+      <span class="u-status-value" id="llm-state">读取中...</span>
+    </div>
   </div>
 
-  <div class="btns">
-    <button id="open-options">⚙️ AI 设置</button>
+  <div class="pp-section-title">快速控制</div>
+  <div class="pp-settings">
+    <label class="u-setting-row" for="rate-on" title="托管播放速度">
+      <span class="u-row-text"><span class="u-row-title">视频倍速</span></span>
+      <select id="rate-value" class="u-select">
+        <option value="1">1.0x</option>
+        <option value="1.25">1.25x</option>
+        <option value="1.5">1.5x</option>
+        <option value="2">2.0x</option>
+        <option value="2.5">2.5x</option>
+        <option value="3">3.0x</option>
+      </select>
+      <input type="checkbox" id="rate-on">
+      <span class="u-switch"></span>
+    </label>
+    <label class="u-setting-row" for="play-on" title="自动播放并拦截站点暂停">
+      <span class="u-row-text"><span class="u-row-title">自动播放</span></span>
+      <input type="checkbox" id="play-on">
+      <span class="u-switch"></span>
+    </label>
+    <label class="u-setting-row" for="mute-on">
+      <span class="u-row-text"><span class="u-row-title">静音</span></span>
+      <input type="checkbox" id="mute-on">
+      <span class="u-switch"></span>
+    </label>
+    <label class="u-setting-row" for="continue-on" title="播完自动跳下一节">
+      <span class="u-row-text"><span class="u-row-title">连续播放</span></span>
+      <input type="checkbox" id="continue-on">
+      <span class="u-switch"></span>
+    </label>
+    <label class="u-setting-row" for="popup-on" title="视频弹窗小题自动作答">
+      <span class="u-row-text"><span class="u-row-title">弹窗秒答</span></span>
+      <input type="checkbox" id="popup-on">
+      <span class="u-switch"></span>
+    </label>
+    <label class="u-setting-row" for="llm-on" title="使用已配置的大模型答题">
+      <span class="u-row-text"><span class="u-row-title">LLM 答题</span></span>
+      <input type="checkbox" id="llm-on">
+      <span class="u-switch"></span>
+    </label>
+    <label class="u-setting-row" for="gate-on" title="学习页章节测验自动交卷：重做错题 + 只爆破错题；考试页不自动交卷">
+      <span class="u-row-text"><span class="u-row-title">闯关模式</span></span>
+      <input type="checkbox" id="gate-on">
+      <span class="u-switch"></span>
+    </label>
   </div>
 
-  <div class="tip">点火启动 / 刷新 / 急救 / 日志等控制台在 uooc.net.cn 页面左侧的悬浮面板里。</div>
+  <div class="pp-actions">
+    <button id="open-options" class="u-btn u-primary u-block">打开完整设置</button>
+  </div>
+  <div class="pp-footer">引擎启停请在课程页面操作</div>
 
   <script src="popup.js"></script>
 </body>

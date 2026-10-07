@@ -1,7 +1,19 @@
 'use strict';
 
 const $ = (id) => document.getElementById(id);
-const status = (t) => { $('status').textContent = t; };
+// Status Banner：按消息首字符分级（✅→成功 / ❌→失败 / ⚠️→警告 / 其他→中性）
+const status = (t) => {
+  const el = $('status');
+  el.hidden = false;
+  el.classList.add('show');
+  el.classList.remove('ok', 'err', 'warn', 'info');
+  el.classList.add(
+    /^[✅✓]/.test(t) ? 'ok'
+      : /^[❌×]/.test(t) ? 'err'
+        : /^[⚠]/.test(t) ? 'warn'
+          : 'info');
+  el.textContent = t;
+};
 
 const TOGGLES = {
   'rate-on': 'rateOn',
@@ -69,5 +81,7 @@ for (const [id, key] of Object.entries(TOGGLES)) {
 }
 $('rate-value').addEventListener('change', (e) =>
   chrome.storage.local.set({ rateValue: Number(e.target.value) || 2 }));
+
+document.getElementById('opt-ver').textContent = 'v' + chrome.runtime.getManifest().version;
 
 load();

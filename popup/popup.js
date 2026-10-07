@@ -18,14 +18,16 @@ async function refresh() {
   for (const [id, key] of Object.entries(KEYS)) $(id).checked = !!items[key];
   $('rate-value').value = String(items.rateValue ?? 2);
 
-  $('engine-state').textContent = items.engineRunning
-    ? '🟢 挂机引擎运行中'
-    : '⚪ 引擎未启动（在课程页面面板点火）';
+  // 状态用圆点颜色 + 纯文本表达，不再用 🟢⚪ emoji
+  $('engine-dot').classList.toggle('on', !!items.engineRunning);
+  $('engine-state').textContent = items.engineRunning ? '运行中' : '未启动';
 
   const c = items.llmConfig;
-  $('llm-state').textContent = (c && c.baseUrl && c.apiKey)
-    ? `🟢 AI 已配置（${c.model || '默认模型'}）`
-    : '⚪ AI 未配置';
+  const ok = !!(c && c.baseUrl && c.apiKey);
+  $('llm-dot').classList.toggle('on', ok);
+  $('llm-state').textContent = ok ? (c.model || '已配置') : '未配置';
+
+  $('pp-ver').textContent = 'v' + chrome.runtime.getManifest().version;
 }
 
 for (const [id, key] of Object.entries(KEYS)) {
