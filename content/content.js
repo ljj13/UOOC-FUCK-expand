@@ -2035,18 +2035,35 @@ if (window.self === window.top) { // 防 iframe 多次注入，只在顶层运�
         <button id="uooc-dock-start" class="uooc-dock-btn" type="button">${ICONS.play}<span>启动挂机</span></button>
         <button id="uooc-dock-toggle" class="uooc-dock-btn" type="button" title="展开 / 收起控制台"><span>控制台</span>${ICONS.chevron}</button>
       `;
+    // ⚠️ 绑定全部做存在性校验：任一控件缺失只跳过该绑定，绝不抛异常。
+    // 历史上（v3.1.x~3.2.0）"Cannot read properties of null (reading 'addEventListener')"
+    // 即来自未校验的控件查询。绑定成功后才置位 dockEl，失败则移除节点让看门狗重试。
+    try {
+      const startBtn2 = dock.querySelector('#uooc-dock-start');
+      const toggleBtn = dock.querySelector('#uooc-dock-toggle');
+      const ticker = dock.querySelector('#uooc-dock-ticker');
+      if (startBtn2) startBtn2.addEventListener('click', () => (engineStarted ? stopEngine() : startEngine(false)));
+      if (toggleBtn) toggleBtn.addEventListener('click', () => { if (panelIsVisible()) minimizePanel(); else expandPanel(true); });
+      if (ticker) {
+        ticker.addEventListener('click', () => expandPanel(true));
+        // 面板构建期缓冲的日志已进 DOM：用最后一条初始化跑马灯，避免停靠条停在"就绪"
+        const lastLogLine = document.querySelector('#uooc-log > div:last-child');
+        if (lastLogLine) ticker.textContent = lastLogLine.textContent;
+      }
+      if (!startBtn2 || !toggleBtn) {
+        console.warn('[UOOC助手Pro] 停靠条控件缺失，本轮跳过挂载');
+        dock.remove();
+        return false;
+      }
+    } catch (e) {
+      console.warn('[UOOC助手Pro] 停靠条绑定失败，本轮跳过挂载:', e);
+      dock.remove();
+      return false;
+    }
     host.appendChild(dock);
     const head = host.closest('.learn-head');
     if (head) head.classList.add('uooc-has-dock'); // 收窄标题，避免压到停靠条
     dockEl = dock;
-    dock.querySelector('#uooc-dock-start').addEventListener('click',
-      () => (engineStarted ? stopEngine() : startEngine(false)));
-    dock.querySelector('#uooc-dock-toggle').addEventListener('click',
-      () => { if (panelIsVisible()) minimizePanel(); else expandPanel(true); });
-    dock.querySelector('#uooc-dock-ticker').addEventListener('click', () => expandPanel(true));
-    // 面板构建期缓冲的日志已进 DOM：用最后一条初始化跑马灯，避免停靠条停在"就绪"
-    const lastLogLine = document.querySelector('#uooc-log > div:last-child');
-    if (lastLogLine) dock.querySelector('#uooc-dock-ticker').textContent = lastLogLine.textContent;
     updateEngineBtn();
     updateDockToggle();
     return true;
@@ -2520,42 +2537,50 @@ if (window.self === window.top) { // 防 iframe 多次注入，只在顶层运�
     }, true);
 
     // 胶囊：Pointer Capture 下拖拽；松手位移 ≤6px 判定为点击展开
-    if (ball) ball.addEventListener('pointerdown', (e) => {
-      if (e.button !== 0) return;
-      e.preventDefault();
-      try { ball.setPointerCapture(e.pointerId); } catch (err) { /* 忽略 */ }
-      ballDrag = { sx: e.clientX, sy: e.clientY, ix: ball.offsetLeft, iy: ball.offsetTop, moved: false };
-      dragInProgress = true;
-    });
-    ball.addEventListener('pointermove', (e) => {
-      if (!ballDrag) return;
-      if (Math.abs(e.clientX - ballDrag.sx) + Math.abs(e.clientY - ballDrag.sy) > 6) ballDrag.moved = true;
-      if (!ballDrag.moved) return;
-      const [nl, nt] = clampDragPos(
-        ballDrag.ix + e.clientX - ballDrag.sx,
-        ballDrag.iy + e.clientY - ballDrag.sy,
-        ball.offsetWidth);
-      ball.style.left = nl + 'px';
-      ball.style.top = nt + 'px';
-    });
-    const onBallUp = (e) => {
-      if (!ballDrag) return;
-      const moved = ballDrag.moved;
-      ballDrag = null;
-      dragInProgress = false;
-      if (!moved) { tryExpandByUser(); return; }
-      snapToEdge(ball);
-    };
-    ball.addEventListener('pointerup', onBallUp);
-    ball.addEventListener('pointercancel', () => { ballDrag = null; dragInProgress = false; });
-    // 兜底：pointer 事件被环境干扰时，click 仍可展开（500ms 去重防双触发）
-    ball.addEventListener('click', () => tryExpandByUser());
+    // ⚠️ 整段以 ball 存在为前提：任一绑定缺失只降级（胶囊不可用），绝不抛异常
+    // 中断 buildPanel（历史上 null.addEventListener 报错即出自此类未校验绑定）。
+    if (ball) {
+      ball.addEventListener('pointerdown', (e) => {
+        if (e.button !== 0) return;
+        e.preventDefault();
+        try { ball.setPointerCapture(e.pointerId); } catch (err) { /* 忽略 */ }
+        ballDrag = { sx: e.clientX, sy: e.clientY, ix: ball.offsetLeft, iy: ball.offsetTop, moved: false };
+        dragInProgress = true;
+      });
+      ball.addEventListener('pointermove', (e) => {
+        if (!ballDrag) return;
+        if (Math.abs(e.clientX - ballDrag.sx) + Math.abs(e.clientY - ballDrag.sy) > 6) ballDrag.moved = true;
+        if (!ballDrag.moved) return;
+        const [nl, nt] = clampDragPos(
+          ballDrag.ix + e.clientX - ballDrag.sx,
+          ballDrag.iy + e.clientY - ballDrag.sy,
+          ball.offsetWidth);
+        ball.style.left = nl + 'px';
+        ball.style.top = nt + 'px';
+      });
+      const onBallUp = (e) => {
+        if (!ballDrag) return;
+        const moved = ballDrag.moved;
+        ballDrag = null;
+        dragInProgress = false;
+        if (!moved) { tryExpandByUser(); return; }
+        snapToEdge(ball);
+      };
+      ball.addEventListener('pointerup', onBallUp);
+      ball.addEventListener('pointercancel', () => { ballDrag = null; dragInProgress = false; });
+      // 兜底：pointer 事件被环境干扰时，click 仍可展开（500ms 去重防双触发）
+      ball.addEventListener('click', () => tryExpandByUser());
+    } else {
+      console.warn('[UOOC助手Pro] 未找到收起胶囊，跳过其绑定');
+    }
     on('uooc-min-btn', () => minimizePanel());
 
     // ---- 考试页精简：隐藏挂机/视频相关控件 ----
     if (isExamPage()) {
-      document.getElementById('uooc-engine-row').style.display = 'none';
-      document.getElementById('uooc-helper-rows').style.display = 'none';
+      const engineRow = document.getElementById('uooc-engine-row');
+      const helperRows = document.getElementById('uooc-helper-rows');
+      if (engineRow) engineRow.style.display = 'none';
+      if (helperRows) helperRows.style.display = 'none';
       log('📄 测评页面模式：配置好 API 后点「开始 AI 答题」');
     }
 
@@ -2565,13 +2590,17 @@ if (window.self === window.top) { // 防 iframe 多次注入，只在顶层运�
     if (!isExamPage()) {
       tryDock();
       setInterval(() => {
-        if (dockEl && !dockEl.isConnected) { // 标题栏被重渲染 → 复位后重挂
-          dockEl = null;
-          dockedMode = false;
-          const p = document.getElementById('uooc-video-panel');
-          if (p) p.classList.remove('docked');
+        try {
+          if (dockEl && !dockEl.isConnected) { // 标题栏被重渲染 → 复位后重挂
+            dockEl = null;
+            dockedMode = false;
+            const p = document.getElementById('uooc-video-panel');
+            if (p) p.classList.remove('docked');
+          }
+          if (!dockedMode) tryDock();
+        } catch (e) {
+          console.warn('[UOOC助手Pro] 停靠看门狗异常（已跳过本轮）:', e);
         }
-        if (!dockedMode) tryDock();
       }, 1500);
     }
 
@@ -2886,6 +2915,10 @@ if (window.self === window.top) { // 防 iframe 多次注入，只在顶层运�
     if (Store.get('engineRunning', false)) startEngine(true);
 
     console.log('[UOOC助手Pro] 初始化完成');
-  })();
+  })().catch((e) => {
+    // 整链兜底：任何未预料的异常只降级记录，绝不冒泡成
+    // chrome://extensions 里的 "Uncaught (in promise)" 错误条目。
+    console.warn('[UOOC助手Pro] 初始化异常（已降级继续，不影响页面）：', e);
+  });
 
 }

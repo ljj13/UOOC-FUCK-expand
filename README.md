@@ -4,7 +4,7 @@
 
 _优课在线（UOOC / 优课联盟）全自动挂机 + AI 答题 · 浏览器扩展（Manifest V3）_
 
-![version](https://img.shields.io/badge/version-3.2.0-blue)
+![version](https://img.shields.io/badge/version-3.2.1-blue)
 ![chrome](https://img.shields.io/badge/Chrome%20%7C%20Edge-MV3-brightgreen)
 ![license](https://img.shields.io/badge/license-MIT-orange)
 
@@ -117,6 +117,11 @@ _优课在线（UOOC / 优课联盟）全自动挂机 + AI 答题 · 浏览器�
 任何刷课行为都有风险，请自行评估。本工具仅作技术学习交流用途。
 
 ## 📜 更新日志
+
+### v3.2.1
+- **修复：扩展错误页反复出现 `Cannot read properties of null (reading 'addEventListener')`**。站点 DOM 在个别时序（标题栏重渲染、页面资源异常等）下会短暂缺少控件元素，此前停靠条挂载与收起胶囊的绑定未做存在性校验，缺元素即抛异常
+- **加固方式**：所有事件绑定改为「先校验存在性、再绑定」——停靠条挂载整体包进 try/catch（任一控件缺失只跳过挂载并移除残骸，看门狗下一轮自动重试）；收起胶囊的 4 处绑定收进 `if (ball)` 保护块；考试页两处隐藏逻辑判空；初始化整链追加 catch。任何 DOM 意外只降级记录，**不再向错误页抛条目，也不中断面板其余功能**
+- **防回归**：`tools/check-panel-ids.cjs` 新增「事件绑定防护审计」——扫描全部 `addEventListener`，识别未判空的链式查询绑定与裸标识符绑定（正则字面量感知 + 作用域包裹块计算），并在 CI 前跑一次即可拦住同类问题
 
 ### v3.2.0
 - **🖥️ 控制台停靠站点标题栏 + 全新浅色主题**。学习页的控制台入口不再悬浮遮挡内容——状态点、运行状态、最新一条日志（点击展开）、启动/停机按钮、「控制台」开合按钮全部嵌进站点顶部黑色标题栏（原本的空白区域）；控制台展开为标题栏下方的下拉面板，700px 高的窗口也不出滚动条。全局由深色改为浅色（白底 + 浅灰描边），悬浮面板 + 胶囊形态保留给非学习页（考试页等）
