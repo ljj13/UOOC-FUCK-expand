@@ -704,8 +704,11 @@ if (window.self === window.top) { // 防 iframe 多次注入，只在顶层运�
 
   async function startEngine(auto = false) {
     if (engineStarted) return;
-    ensureHeartbeat();
     endReached = false;
+    // ⚠️ 自动续跑路径没有用户手势：此时创建/恢复 AudioContext 会触发
+    // Chrome 自动播放策略警告（扩展错误页里的 "AudioContext was not allowed to start"）。
+    // 心跳只在手动点火（有真实点击手势）时启动；自动续跑的防降频由伪装可见性兜底。
+    if (!auto) ensureHeartbeat();
 
     try {
       if ('wakeLock' in navigator) {
@@ -1246,6 +1249,22 @@ if (window.self === window.top) { // 防 iframe 多次注入，只在顶层运�
 
   // 🚧 主流程：LLM投票作答 → 自动交卷 → 未通过则 LLM 只重做错题 → 仍不过 → 只爆破错题
   async function runGatePipeline() {
+    // ⚡ 接口直答前置尝试：getTaskPaper/commit 直答（任何失败自动回退页面流程）
+    if (Store.get('apiDirectOn', true)) {
+      try {
+        const api = await apiExamSolve();
+        if (api) {
+          log(`⚡ 接口直答完成：确认 ${api.right}/${api.total} 题，提交 ${api.commits} 次，刷新页面同步状态...`);
+          speak('接口直答完成');
+          setTimeout(() => location.reload(), 1500);
+          return;
+        }
+        log('↩️ 接口直答不可用，回退页面答题流程');
+      } catch (e) {
+        log('↩️ 接口直答异常（' + (e.message || e) + '），回退页面答题流程');
+      }
+    }
+
     const questions = extractQuestions();
     if (!questions.length) {
       alert('未找到题目（.queContainer）。\n请确认当前是章节测验页面，且试卷已加载完成。');
@@ -1309,6 +1328,223 @@ if (window.self === window.top) { // 防 iframe 多次注入，只在顶层运�
         return;
       }
     }
+  }
+
+  // ==================== 9.8 实验性直连接口（课程 Web 会话） ====================
+  // 凭据：默认走页面自身 Cookie（同源 fetch 自动携带）；可选在设置页填入手机 App
+  // 抓包的 Bearer Token，请求时会附加 Android 客户端头。所有失败路径都回退页面流程。
+
+  const UOOC_API = {
+    extraHeaders() {
+      const token = Store.get('appToken', '');
+      const h = {};
+      if (token) {
+        h['Authorization'] = 'Bearer ' + token;
+        h['sourceFlag'] = 'android';
+        h['versionFlag'] = 'v2.0.3';
+        h['productFlag'] = 'OnePlus PJA110 13';
+        h['machineFlag'] = '';
+        h['xgTokenFlag'] = '';
+      }
+      return h;
+    },
+    cid() {
+      const m = location.href.match(/index#\/(\d+)\//) || location.href.match(/[?&#]cid=(\d+)/);
+      return m ? m[1] : null;
+    },
+    async getJSON(path, params) {
+      const qs = new URLSearchParams(params || {}).toString();
+      const resp = await fetch(path + (qs ? '?' + qs : ''), { credentials: 'same-origin', headers: this.extraHeaders() });
+      return resp.json().catch(() => null);
+    },
+    async postForm(path, params) {
+      const resp = await fetch(path, {
+        method: 'POST',
+        credentials: 'same-origin',
+        headers: Object.assign({ 'Content-Type': 'application/x-www-form-urlencoded; charset=UTF-8' }, this.extraHeaders()),
+        body: new URLSearchParams(params).toString()
+      });
+      return resp.json().catch(() => null);
+    },
+    async getCourseLearn(cid) {
+      const j = await this.getJSON('/home/learn/getCourseLearn', { cid });
+      return j && j.data ? j.data : null;
+    },
+    async getUnitLearn(cid, chapterId, sectionId, catalogId) {
+      const j = await this.getJSON('/home/learn/getUnitLearn', {
+        cid, chapter_id: chapterId, section_id: sectionId, catalog_id: catalogId
+      });
+      return j && Array.isArray(j.data) ? j.data : null;
+    },
+    async getTaskPaper(tid) {
+      const j = await this.getJSON('/exam/getTaskPaper', { tid });
+      const qs = j && j.data && Array.isArray(j.data.questions) ? j.data.questions : null;
+      return qs && qs.length ? qs : null;
+    },
+    async commit(cid, tid, answers) {
+      return this.postForm('/exam/commit', { cid, tid, data: JSON.stringify(answers) });
+    },
+    async markVideoLearn(cid, learn, videoLength, videoPos) {
+      const j = await this.postForm('/home/learn/markVideoLearn', {
+        chapter_id: learn.chapter_id, cid, network: 3, resource_id: learn.resource_id,
+        section_id: learn.section_id, source: 1, subsection_id: learn.subsection_id,
+        video_length: videoLength, video_pos: videoPos
+      });
+      return !!(j && j.data && j.data.finished == 1);
+    }
+  };
+
+  // ⚡ 极速完成：跳过播放，直接上报进度到 100%。失败（含服务端不判定完成）
+  // 会分段补报几次，仍失败则回退普通播放，且本节不再重试。
+  let fastBusy = false;
+  const fastDoneKeys = new Set();
+
+  async function fastTrack(video) {
+    if (fastBusy) return;
+    const key = sectionKey() || location.hash;
+    if (fastDoneKeys.has(key)) { resumeVideo(); return; }
+    fastBusy = true;
+    try {
+      const cid = UOOC_API.cid();
+      if (!cid) throw new Error('未取得课程 cid');
+      const learn = await UOOC_API.getCourseLearn(cid);
+      if (!learn || !learn.chapter_id) throw new Error('getCourseLearn 无定位参数');
+
+      let len = Math.round(video.duration || 0);
+      if (!len) {
+        try {
+          const src = JSON.parse(document.querySelector('div[uooc-video]')?.getAttribute('source') || 'null');
+          len = Math.round(src?.videos?.[0]?.duration || 0);
+        } catch (e) { /* 忽略 */ }
+      }
+      len = len > 0 ? len : 100;
+
+      log(`⚡ 极速模式：直接上报本节完成（${len}s）...`);
+      let ok = await UOOC_API.markVideoLearn(cid, learn, len, len);
+      if (!ok) {
+        // 服务端可能校验进度递增，分段补报兜底
+        for (let i = 1; i <= 20 && !ok; i++) {
+          await wait(1200);
+          ok = await UOOC_API.markVideoLearn(cid, learn, len, Math.round((len * i) / 20));
+        }
+      }
+      if (!ok) throw new Error('服务端未判定完成');
+
+      fastDoneKeys.add(key);
+      log('⚡ 极速完成本节，跳转下一节');
+      navigate('极速完成');
+    } catch (e) {
+      fastDoneKeys.add(key);
+      log('⚠️ 极速模式不可用（' + (e.message || e) + '），本节回退普通播放');
+      resumeVideo();
+    } finally {
+      setTimeout(() => { fastBusy = false; }, 1500);
+    }
+  }
+
+  // ⚡ 接口直答：getTaskPaper 取卷 → 泄漏答案/LLM 投票 → commit 逐题判分 →
+  // 错题接口级穷举 → 整卷提交。任何一步失败返回 null，闯关流水线回退页面流程。
+  // ⚠️ 仅用于学习页章节测验；/exam/ 考试页永不调用。
+  function buildApiPrompt(paper) {
+    let p = '请回答以下选择题，每题直接给出答案选项字母（如 A、B、C、D 或 A,B），不需要解释。\n\n';
+    paper.forEach((q, i) => {
+      p += `第${i + 1}题\n`;
+      Object.keys(q.options || {}).forEach((k, j) => {
+        p += `${String.fromCharCode(65 + j)}. ${String(q.options[k]).replace(/<[^>]*>/g, '').trim()}\n`;
+      });
+      p += '\n';
+    });
+    p += '请按格式返回：\n1. A\n2. B,C\n...';
+    return p;
+  }
+
+  async function apiExamSolve() {
+    const cid = UOOC_API.cid();
+    if (!cid) return null;
+
+    let tid = (location.href.match(/[?&#]tid=(\d+)/) || [])[1] || null;
+    let paper = tid ? await UOOC_API.getTaskPaper(tid) : null;
+    if (!paper) {
+      // 从章节上下文定位当前未完成测验的 task_id
+      const learn = await UOOC_API.getCourseLearn(cid);
+      if (!learn || !learn.catalog_id) return null;
+      const units = await UOOC_API.getUnitLearn(cid, learn.chapter_id, learn.section_id, learn.catalog_id);
+      const task = (units || []).find((u) => u.task_id && u.task_id != 0);
+      if (!task) return null;
+      tid = String(task.task_id);
+      paper = await UOOC_API.getTaskPaper(tid);
+    }
+    if (!paper || !paper.length) return null;
+    log(`⚡ 接口直答：取到试卷 ${paper.length} 题（tid=${tid}）`);
+
+    const keysOf = (q) => Object.keys(q.options || {});
+    const keyOfLetter = (q, L) => {
+      const keys = keysOf(q);
+      return keys[(L || 'A').charCodeAt(0) - 65] || keys[0];
+    };
+    const isSingle = (q) => q.type === 10 || keysOf(q).length <= 2;
+
+    // 首轮答案：泄漏字段优先，缺的用 LLM 投票补
+    let answers = paper.map((q) => {
+      const leak = q.answer || q.right || q.correct;
+      return leak ? (Array.isArray(leak) ? leak : [leak]) : null;
+    });
+    if (answers.some((a) => !a)) {
+      const voted = await llmVoteAnswers(buildApiPrompt(paper), paper.length, 0.3, '接口直答');
+      if (voted) {
+        answers = answers.map((a, i) =>
+          a || (voted[i] ? voted[i].map((L) => keyOfLetter(paper[i], L)) : null));
+      }
+    }
+
+    const MAX_COMMITS = 200;
+    let commits = 0;
+    const scoreOf = async (q, ans) => {
+      commits++;
+      const j = await UOOC_API.commit(cid, tid, [{ qid: q.id, answer: ans }]);
+      await wait(100);
+      return j && j.data && j.data.score != null ? j.data.score : null;
+    };
+
+    let right = 0;
+    const finalAnswers = [];
+    for (let i = 0; i < paper.length; i++) {
+      const q = paper[i];
+      let ans = answers[i] || [];
+
+      // 首验：判分接口不可读就直接放弃接口直答（回退页面流程）
+      if (ans.length && commits < MAX_COMMITS) {
+        const s = await scoreOf(q, ans);
+        if (s === null) {
+          log('⚠️ 接口未返回判分字段，接口直答不可用');
+          return null;
+        }
+        if (s !== 0) { right++; finalAnswers.push({ qid: q.id, answer: ans }); continue; }
+      }
+
+      // 错题/未作答：接口级穷举（单选逐项；多选按子集大小 2→3→…→1）
+      const keys = keysOf(q);
+      const combos = isSingle(q)
+        ? keys.map((k) => [k])
+        : multiCombos(keys.length).map((idx) => idx.map((x) => keys[x]));
+      let solved = false;
+      for (const cand of combos) {
+        if (commits >= MAX_COMMITS) break;
+        const s = await scoreOf(q, cand);
+        if (s !== null && s !== 0) {
+          log(`⚡ 第${i + 1}题接口穷举命中（${cand.join('')}）`);
+          ans = cand; right++; solved = true;
+          break;
+        }
+      }
+      if (!solved) log(`⚠️ 第${i + 1}题未能穷举命中，保留当前作答`);
+      finalAnswers.push({ qid: q.id, answer: ans });
+    }
+
+    if (commits >= MAX_COMMITS) log('⛔ 接口提交达到上限，直接整卷提交当前答案');
+    commits++;
+    await UOOC_API.commit(cid, tid, finalAnswers);
+    return { right, total: paper.length, commits };
   }
 
   // ==================== 10. 复制题目答案（已提交测验的回顾页） ====================
@@ -1547,6 +1783,11 @@ if (window.self === window.top) { // 防 iframe 多次注入，只在顶层运�
                 <input type="checkbox" id="uooc-popup-on">
                 <span class="uooc-switch"></span>
               </label>
+              <label class="uooc-setting" title="实验性：通过课程接口直接上报视频完成，失败自动回退普通播放">
+                <span class="uooc-setting-text"><span class="uooc-setting-title">极速完成</span><span class="uooc-setting-desc">接口直报，跳过播放</span></span>
+                <input type="checkbox" id="uooc-fast-on">
+                <span class="uooc-switch"></span>
+              </label>
             </div>
             <div id="uooc-ai-sec">
               <div class="uooc-sec-head">
@@ -1627,6 +1868,7 @@ if (window.self === window.top) { // 防 iframe 多次注入，只在顶层运�
     bindToggle('uooc-continue-on', 'continueOn');
     bindToggle('uooc-popup-on', 'popupSolveOn');
     bindToggle('uooc-gate-on', 'gateOn');
+    bindToggle('uooc-fast-on', 'fastModeOn');
 
     document.getElementById('uooc-rate-value').addEventListener('change', (e) => {
       Store.set({ rateValue: Number(e.target.value) || 2 });
@@ -1724,6 +1966,7 @@ if (window.self === window.top) { // 防 iframe 多次注入，只在顶层运�
       'uooc-continue-on': ['continueOn', true],
       'uooc-popup-on': ['popupSolveOn', true],
       'uooc-gate-on': ['gateOn', true],
+      'uooc-fast-on': ['fastModeOn', false],
       'uooc-llm-on': ['llmEnabled', false]
     };
     for (const [id, [key, dft]] of Object.entries(map)) {
@@ -1932,7 +2175,11 @@ if (window.self === window.top) { // 防 iframe 多次注入，只在顶层运�
       if (video) {
         noVideoTimer = 0;
         endReached = false; // 有视频在播说明还没到头，解除封顶锁
-        resumeVideo();
+        if (engineStarted && Store.get('fastModeOn', false)) {
+          fastTrack(video); // ⚡ 极速模式：接口直报完成（失败自动回退播放）
+        } else {
+          resumeVideo();
+        }
         return;
       }
 

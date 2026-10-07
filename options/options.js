@@ -21,15 +21,18 @@ const TOGGLES = {
   'play-on': 'playOn',
   'continue-on': 'continueOn',
   'popup-on': 'popupSolveOn',
+  'fast-on': 'fastModeOn',
+  'api-direct': 'apiDirectOn',
   'gate-on': 'gateOn'
 };
 
 async function load() {
-  const items = await chrome.storage.local.get(['llmConfig', ...Object.values(TOGGLES), 'rateValue']);
+  const items = await chrome.storage.local.get(['llmConfig', 'appToken', ...Object.values(TOGGLES), 'rateValue']);
   const c = items.llmConfig || {};
   $('baseurl').value = c.baseUrl || '';
   $('apikey').value = c.apiKey || '';
   $('model').value = c.model || '';
+  $('app-token').value = items.appToken || '';
   for (const [id, key] of Object.entries(TOGGLES)) $(id).checked = items[key] !== false;
   $('rate-value').value = String(items.rateValue ?? 2);
 }
@@ -40,7 +43,10 @@ $('btn-save').onclick = async () => {
   const model = $('model').value.trim();
   if (!baseUrl || !apiKey) { status('❌ Base URL 和 API Key 必填'); return; }
 
-  await chrome.storage.local.set({ llmConfig: { baseUrl, apiKey, model } });
+  await chrome.storage.local.set({
+    llmConfig: { baseUrl, apiKey, model },
+    appToken: $('app-token').value.trim()
+  });
 
   // 授予该 API 域名的可选跨域权限，后台才能直连（否则可能被 CORS 拦截）
   let msg = '✅ 配置已保存';

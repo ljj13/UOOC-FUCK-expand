@@ -11,6 +11,9 @@ chrome.runtime.onInstalled.addListener(async () => {
     continueOn: true,
     popupSolveOn: true,
     gateOn: true,
+    fastModeOn: false,
+    apiDirectOn: true,
+    appToken: '',
     llmEnabled: false,
     engineRunning: false,
     llmConfig: null

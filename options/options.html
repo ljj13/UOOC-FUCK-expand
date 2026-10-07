@@ -53,6 +53,16 @@
     </section>
 
     <section class="u-card">
+      <h2 class="u-card-title">实验性直连接口</h2>
+      <p class="u-card-desc">极速完成（markVideoLearn 直通）与接口直答（getTaskPaper / commit）。默认使用页面登录会话，接口失败都会自动回退页面流程；/exam/ 考试页永不使用接口直答与自动交卷。</p>
+      <div class="u-field">
+        <label for="app-token">App Token（可选）</label>
+        <input type="password" id="app-token" class="u-input" placeholder="从手机 App 抓包获取的 Bearer Token，Web 会话被拒时附加">
+      </div>
+      <p class="opt-note">Token 随「保存配置」一起保存到本地。开关在上方「自动化偏好」。</p>
+    </section>
+
+    <section class="u-card">
       <h2 class="u-card-title">自动化偏好</h2>
       <p class="u-card-desc">挂机引擎与视频助手的默认行为。</p>
       <label class="u-setting-row" for="rate-on" title="托管播放速度">
@@ -86,6 +96,16 @@
       <label class="u-setting-row" for="popup-on" title="视频弹窗小题自动作答">
         <span class="u-row-text"><span class="u-row-title">弹窗秒答</span><span class="u-row-desc">自动处理视频小题</span></span>
         <input type="checkbox" id="popup-on">
+        <span class="u-switch"></span>
+      </label>
+      <label class="u-setting-row" for="fast-on" title="实验性：通过课程接口直接上报视频完成，失败自动回退普通播放">
+        <span class="u-row-text"><span class="u-row-title">极速完成</span><span class="u-row-desc">接口直报，跳过播放（实验性）</span></span>
+        <input type="checkbox" id="fast-on">
+        <span class="u-switch"></span>
+      </label>
+      <label class="u-setting-row" for="api-direct" title="章节测验闯关时优先尝试 getTaskPaper/commit 接口直答，失败自动回退页面流程；/exam/ 考试页不受影响">
+        <span class="u-row-text"><span class="u-row-title">接口直答</span><span class="u-row-desc">章节测验优先走接口（实验性）</span></span>
+        <input type="checkbox" id="api-direct">
         <span class="u-switch"></span>
       </label>
       <label class="u-setting-row" for="gate-on" title="学习页章节测验自动交卷：重做错题 + 只爆破错题；/exam/ 考试页不自动交卷">
