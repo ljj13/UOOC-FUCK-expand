@@ -37,6 +37,12 @@ for (const [id, key] of Object.entries(KEYS)) {
 $('rate-value').addEventListener('change', (e) =>
   chrome.storage.local.set({ rateValue: Number(e.target.value) || 2 }));
 $('open-options').addEventListener('click', () => chrome.runtime.openOptionsPage());
+$('expand-panel').addEventListener('click', async () => {
+  try {
+    const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
+    if (tab && tab.id) await chrome.tabs.sendMessage(tab.id, { type: 'PANEL_EXPAND' });
+  } catch (e) { /* 当前不是课程页或未注入 */ }
+});
 
 chrome.storage.onChanged.addListener(refresh);
 refresh();

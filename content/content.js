@@ -1994,7 +1994,7 @@ if (window.self === window.top) { // 防 iframe 多次注入，只在顶层运�
         #uooc-log::-webkit-scrollbar { width:4px; }
         #uooc-log::-webkit-scrollbar-track { background:transparent; }
         #uooc-log::-webkit-scrollbar-thumb { background:rgba(148,163,184,.25); border-radius:2px; }
-        #uooc-min-ball { position:fixed; top:20px; left:20px; width:40px; height:40px; background:rgba(15,23,42,.96); border:1px solid rgba(148,163,184,.18); border-radius:12px; z-index:2147483647; pointer-events:auto; display:none; align-items:center; justify-content:center; cursor:move; user-select:none; box-shadow:0 10px 30px rgba(0,0,0,.30); }
+        #uooc-min-ball { position:fixed; top:20px; left:20px; width:40px; height:40px; background:rgba(15,23,42,.96); border:1px solid rgba(148,163,184,.18); border-radius:12px; z-index:2147483647; pointer-events:auto; display:none; align-items:center; justify-content:center; cursor:move; user-select:none; box-shadow:0 10px 30px rgba(0,0,0,.30); touch-action:none; }
         .uooc-ball-u { font-size:15px; font-weight:700; color:#cbd5e1; }
         .uooc-ball-dot { display:none; position:absolute; top:-2px; right:-2px; width:10px; height:10px; border-radius:50%; background:#22c55e; border:2px solid #0b0f17; }
         #uooc-min-ball.running .uooc-ball-dot { display:block; animation:uooc-ballpulse 2.4s ease-in-out infinite; }
@@ -2202,43 +2202,87 @@ if (window.self === window.top) { // 防 iframe 多次注入，只在顶层运�
     }
 
     // ---- 拖拽（带左右边缘吸附）与最小化 ----
-    // 胶囊的"点击展开"不走 click 事件：click 会被站点全局处理器干扰，
-    // 且拖拽抑制标志在高分屏微小抖动下会误吞 click（v3.1.1 胶囊打不开的原因）。
-    // 改为在胶囊 mouseup 时按位移判定：没怎么动 = 点击展开，动了 = 拖拽结束。
-    let isDragging = false, startX, startY, initLeft, initTop;
-    dragBar.onmousedown = ball.onmousedown = (e) => {
-      isDragging = true; dragInProgress = true;
-      startX = e.clientX; startY = e.clientY;
-      const t = panel.style.display !== 'none' ? panel : ball;
-      initLeft = t.offsetLeft; initTop = t.offsetTop;
-    };
-    document.onmousemove = (e) => {
-      if (!isDragging) return;
-      const t = panel.style.display !== 'none' ? panel : ball;
-      let nl = initLeft + e.clientX - startX;
-      const nt = initTop + e.clientY - startY;
+    // ⚠️ 交互全部走 addEventListener：不用 document.onXXX 属性赋值（会被页面脚本
+    // 整体覆盖），不单独依赖 click（会被站点全局 mouse/click 处理器干扰）。
+    // v3.1.1/v3.1.2 胶囊打不开的根因即此——事件通道本身被页面吃掉。
+    // 胶囊用 Pointer Capture：拖拽与点击判定都在胶囊自身事件上完成。
+    let panelDrag = null; // {sx, sy, ix, iy}
+    let ballDrag = null;  // {sx, sy, ix, iy, moved}
+    let lastExpandAt = 0;
+
+    function tryExpandByUser() {
+      const now = Date.now();
+      if (now - lastExpandAt < 500) return; // pointerup + click 双通道去重
+      lastExpandAt = now;
+      try { expandPanel(true); } catch (e) { console.error('[UOOC助手Pro] 展开面板失败', e); }
+    }
+    function clampDragPos(nl, nt, w) {
       // 左右边缘吸附：进入边缘 44px 范围就吸附到 12px 边距
       if (nl < 44) nl = 12;
-      if (window.innerWidth - nl - t.offsetWidth < 44) nl = window.innerWidth - t.offsetWidth - 12;
-      t.style.left = nl + 'px';
-      t.style.top = Math.max(0, Math.min(nt, window.innerHeight - 40)) + 'px';
-    };
-    document.onmouseup = (e) => {
-      const wasDragging = isDragging;
-      isDragging = false;
+      if (window.innerWidth - nl - w < 44) nl = window.innerWidth - w - 12;
+      return [nl, Math.max(0, Math.min(nt, window.innerHeight - 40))];
+    }
+
+    // 面板拖拽（标题栏起手）；capture 阶段监听，先于页面处理器
+    dragBar.addEventListener('mousedown', (e) => {
+      e.preventDefault();
+      panelDrag = { sx: e.clientX, sy: e.clientY, ix: panel.offsetLeft, iy: panel.offsetTop };
+      dragInProgress = true;
+    });
+    document.addEventListener('mousemove', (e) => {
+      if (!panelDrag) return;
+      const [nl, nt] = clampDragPos(
+        panelDrag.ix + e.clientX - panelDrag.sx,
+        panelDrag.iy + e.clientY - panelDrag.sy,
+        panel.offsetWidth);
+      panel.style.left = nl + 'px';
+      panel.style.top = nt + 'px';
+    }, true);
+    document.addEventListener('mouseup', (e) => {
+      if (!panelDrag) return;
+      const [nl, nt] = clampDragPos(
+        panelDrag.ix + e.clientX - panelDrag.sx,
+        panelDrag.iy + e.clientY - panelDrag.sy,
+        panel.offsetWidth);
+      panel.style.left = nl + 'px';
+      panel.style.top = nt + 'px';
+      panelDrag = null;
       dragInProgress = false;
-      if (!wasDragging) return;
-      const t = panel.style.display !== 'none' ? panel : ball;
-      // 胶囊上松手且几乎没移动 → 视为点击展开（不依赖 click 事件）
-      if (t === ball
-        && Math.abs(e.clientX - startX) <= 6
-        && Math.abs(e.clientY - startY) <= 6) {
-        expandPanel(true);
-        return;
-      }
-      snapToEdge(t);
+      snapToEdge(panel);
+    }, true);
+
+    // 胶囊：Pointer Capture 下拖拽；松手位移 ≤6px 判定为点击展开
+    ball.addEventListener('pointerdown', (e) => {
+      if (e.button !== 0) return;
+      e.preventDefault();
+      try { ball.setPointerCapture(e.pointerId); } catch (err) { /* 忽略 */ }
+      ballDrag = { sx: e.clientX, sy: e.clientY, ix: ball.offsetLeft, iy: ball.offsetTop, moved: false };
+      dragInProgress = true;
+    });
+    ball.addEventListener('pointermove', (e) => {
+      if (!ballDrag) return;
+      if (Math.abs(e.clientX - ballDrag.sx) + Math.abs(e.clientY - ballDrag.sy) > 6) ballDrag.moved = true;
+      if (!ballDrag.moved) return;
+      const [nl, nt] = clampDragPos(
+        ballDrag.ix + e.clientX - ballDrag.sx,
+        ballDrag.iy + e.clientY - ballDrag.sy,
+        ball.offsetWidth);
+      ball.style.left = nl + 'px';
+      ball.style.top = nt + 'px';
+    });
+    const onBallUp = (e) => {
+      if (!ballDrag) return;
+      const moved = ballDrag.moved;
+      ballDrag = null;
+      dragInProgress = false;
+      if (!moved) { tryExpandByUser(); return; }
+      snapToEdge(ball);
     };
-    document.getElementById('uooc-min-btn').onclick = () => minimizePanel();
+    ball.addEventListener('pointerup', onBallUp);
+    ball.addEventListener('pointercancel', () => { ballDrag = null; dragInProgress = false; });
+    // 兜底：pointer 事件被环境干扰时，click 仍可展开（500ms 去重防双触发）
+    ball.addEventListener('click', () => tryExpandByUser());
+    document.getElementById('uooc-min-btn').addEventListener('click', () => minimizePanel());
 
     // ---- 考试页精简：隐藏挂机/视频相关控件 ----
     if (isExamPage()) {
@@ -2511,6 +2555,13 @@ if (window.self === window.top) { // 防 iframe 多次注入，只在顶层运�
   }, 800);
 
   // ==================== 14. 初始化 ====================
+
+  // Popup 的「展开悬浮面板」按钮：任何事件环境问题下的可靠恢复通道
+  chrome.runtime.onMessage.addListener((msg) => {
+    if (msg && msg.type === 'PANEL_EXPAND') {
+      try { expandPanel(true); } catch (e) { /* 忽略 */ }
+    }
+  });
 
   function waitBody() {
     return new Promise((resolve) => {
