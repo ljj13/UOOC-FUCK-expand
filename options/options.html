@@ -48,8 +48,9 @@
     </div>
     <div id="status"></div>
     <div class="note">
-      保存时会请求该 API 域名的跨域访问权限（仅此域名），请求由扩展后台发出，
-      API Key 只保存在本地 chrome.storage.local，不会进入网页。
+      Base URL 支持三种填法，会自动规范化：根地址（api.openai.com）、版本地址（.../v1、.../api/v3）、
+      完整地址（.../chat/completions）。保存时会请求该 API 域名的跨域访问权限（仅此域名），
+      请求由扩展后台发出，API Key 只保存在本地 chrome.storage.local，不会进入网页。
     </div>
   </div>
 

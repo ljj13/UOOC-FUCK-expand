@@ -21,6 +21,18 @@ chrome.runtime.onInstalled.addListener(async () => {
   if (Object.keys(patch).length) await chrome.storage.local.set(patch);
 });
 
+// Base URL 自动规范化：
+//   https://api.openai.com              -> https://api.openai.com/v1/chat/completions
+//   https://api.openai.com/v1           -> https://api.openai.com/v1/chat/completions
+//   https://ark.cn-beijing.volces.com/api/v3 -> .../api/v3/chat/completions（保留已有版本号）
+//   误填到 .../chat/completions          -> 去重后拼回
+function normalizeApiUrl(raw) {
+  let u = String(raw || '').trim().replace(/\/+$/, '');
+  u = u.replace(/\/chat\/completions$/i, '');
+  if (!/\/v\d+$/.test(u)) u += '/v1';
+  return u + '/chat/completions';
+}
+
 // LLM 请求统一走 Service Worker：
 // 1) 不受页面 CSP / CORS 限制（需在设置页保存时授予 API 域名的可选权限）；
 // 2) API Key 只存在 chrome.storage.local，不进入页面脚本环境。
@@ -34,8 +46,7 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
       if (!cfg.baseUrl || !cfg.apiKey) {
         return sendResponse({ ok: false, error: '未配置 API，请点击面板 ⚙️ 打开设置页' });
       }
-      const base = String(cfg.baseUrl).replace(/\/+$/, '');
-      const resp = await fetch(`${base}/chat/completions`, {
+      const resp = await fetch(normalizeApiUrl(cfg.baseUrl), {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',

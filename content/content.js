@@ -65,6 +65,7 @@ if (window.self === window.top) { // 防 iframe 多次注入，只在顶层运�
   let noVideoTimer = 0;           // 无视频累计秒数（附件跳过用）
   let isExamAlarmed = false;      // 独立测验警报
   let isPopupAlarmed = false;     // 弹窗小题超时警报
+  let isVerifyAlarmed = false;    // 智能验证弹窗警报
   let wasPopActive = false;       // 上一轮弹窗是否可见（检测"新一轮弹窗"）
   let lastSuccessIdx = -1;        // 目录雷达上次成功命中的索引
   let wakeLock = null;            // 屏幕常亮锁
@@ -172,11 +173,26 @@ if (window.self === window.top) { // 防 iframe 多次注入，只在顶层运�
   // 🔑 让页面"活过来"。优课的弹层 = #quizLayer（题目）+ .layui-layer-shade（全屏遮罩）。
   //    只 display:none 题目层，遮罩依旧压在最高层吃掉所有鼠标事件，
   //    这就是"小题消失了，但整页点不动"的原因。必须一起收掉遮罩和 body 滚动锁。
+  // 🛡️ 但智能验证层在屏时不能回收遮罩——验证弹窗依赖遮罩交互（经验取自 xiaochai/UOOC学习助手）
   function unlockPage() {
-    document.querySelectorAll('.layui-layer-shade').forEach((el) => el.remove());
+    if (!verifyLayerVisible()) {
+      document.querySelectorAll('.layui-layer-shade').forEach((el) => el.remove());
+    }
     document.body.classList.remove('layui-layer-lock', 'layui-layer-nobg');
     document.body.style.overflow = '';
     document.documentElement.style.overflow = '';
+  }
+
+  // 🛡️ 智能验证 / 安全验证类弹层检测（阿里云验证码，提交试卷时可能触发）。
+  // 文本特征判断；排除题目层本身（弹窗小题的提交按钮也含"提交"字样）。
+  function verifyLayerVisible() {
+    return Array.from(document.querySelectorAll('.layui-layer')).some((el) => {
+      if (el.classList.contains('layui-layer-shade')) return false;
+      if (el.offsetHeight <= 10) return false;
+      if (el.id === 'quizLayer' || el.classList.contains('smallTest-view')) return false;
+      if (el.querySelector('.ti-q-c')) return false;
+      return /验证|智能|安全|提交/.test(el.innerText || '');
+    });
   }
 
   function closeQuizLayer(layer) {
@@ -192,6 +208,7 @@ if (window.self === window.top) { // 防 iframe 多次注入，只在顶层运�
   function cleanOrphanShade() {
     const shade = document.querySelector('.layui-layer-shade');
     if (!shade) return;
+    if (verifyLayerVisible()) return; // 🛡️ 验证层在屏时不动遮罩
 
     const quizLayer = document.querySelector(QUIZ_SEL);
     const quizVisible = !!quizLayer
@@ -323,12 +340,8 @@ if (window.self === window.top) { // 防 iframe 多次注入，只在顶层运�
     }
   }
 
-  // 🤖 第二层：嗅探失败且 LLM 已启用时，把题面发给大模型要一个字母答案
-  async function llmPopupMask(layer, inputs) {
-    if (!Store.get('llmEnabled', false)) return null;
-    const c = Store.get('llmConfig', null);
-    if (!c || !c.baseUrl || !c.apiKey) return null;
-
+  // 🤖 第二层：嗅探失败且 LLM 已启用时，把题面发给大模型要一个字母答案（单次采样）
+  async function llmPopupOnce(layer, inputs) {
     const qEl = layer.querySelector('.ti-q-c');
     const opts = Array.from(layer.querySelectorAll('.ti-alist > div, label.ti-a'));
     if (!qEl || !opts.length) return null;
@@ -340,36 +353,58 @@ if (window.self === window.top) { // 防 iframe 多次注入，只在顶层运�
       prompt += `${String.fromCharCode(65 + i)}. ${t}\n`;
     });
 
-    const res = await llmChat([{ role: 'user', content: prompt }], 0.1);
-    if (!res || !res.ok) {
-      log('🤖 LLM 调用失败：' + ((res && (res.error || 'HTTP ' + res.status)) || '未知错误'));
-      return null;
-    }
+    const res = await llmChat([{ role: 'user', content: prompt }], 0.3);
+    if (!res || !res.ok) return null;
     const text = (res.data && res.data.choices && res.data.choices[0] &&
       res.data.choices[0].message && res.data.choices[0].message.content) || '';
-    const letters = (text.match(/[A-H]/g) || []).slice(0, inputs.length);
+    const letters = [...new Set(text.match(/[A-H]/g) || [])].slice(0, inputs.length);
     if (!letters.length) return null;
 
     let mask = 0;
-    for (const L of new Set(letters)) {
+    for (const L of letters) {
       const inp = inputs[L.charCodeAt(0) - 65];
       if (inp) mask |= (1 << inputs.indexOf(inp));
     }
-    return mask ? { mask, letters: [...new Set(letters)].join('') } : null;
+    return mask ? { mask, letters: letters.join('') } : null;
   }
 
-  // 🚦 单选组一次只能点一个 —— 多 bit 掩码对 radio 根本点不出来，这类组合纯属浪费。
-  function maskAchievable(inputs, mask) {
-    const seen = new Set();
-    for (let j = 0; j < inputs.length; j++) {
-      if (!(mask & (1 << j))) continue;
-      const inp = inputs[j];
-      if (inp.type !== 'radio') continue;
-      const key = inp.name || `__r${j}`;
-      if (seen.has(key)) return false;
-      seen.add(key);
+  // 🗳️ 采样投票：并行问 3 次，取多数；票数并列时补问 2 次再投，仍并列则放弃。
+  // （借鉴 fastuooc 的 self-consistency 方案，显著降低单次幻觉答错率）
+  async function llmPopupMaskVote(layer, inputs) {
+    const c = Store.get('llmConfig', null);
+    if (!Store.get('llmEnabled', false) || !c || !c.baseUrl || !c.apiKey) return null;
+
+    const ask = () => llmPopupOnce(layer, inputs).catch(() => null);
+    const first = await Promise.all([ask(), ask(), ask()]);
+    let pick = majorityVote(first);
+    if (pick.tied) {
+      const extra = await Promise.all([ask(), ask()]);
+      pick = majorityVote(first.concat(extra));
     }
-    return true;
+    if (pick.tied) {
+      if (first.every((r) => r === null)) log('🤖 LLM 采样全部失败，请检查 API 配置（设置页可测试连接）');
+      return null;
+    }
+    log(`🗳️ LLM 投票：${pick.letters}（${pick.votes}/${pick.total} 票）`);
+    return pick;
+  }
+
+  function majorityVote(results) {
+    const valid = results.filter(Boolean);
+    if (!valid.length) return { tied: true };
+    const groups = new Map();
+    for (const r of valid) {
+      const key = r.letters.split('').sort().join('');
+      if (!groups.has(key)) groups.set(key, { key, count: 0, rep: r });
+      groups.get(key).count++;
+    }
+    let best = null;
+    for (const g of groups.values()) {
+      if (!best || g.count > best.count) best = g;
+    }
+    const tops = [...groups.values()].filter((g) => g.count === best.count);
+    if (tops.length !== 1) return { tied: true };
+    return { tied: false, mask: best.rep.mask, letters: best.rep.letters, votes: best.count, total: valid.length };
   }
 
   // 🧭 当前小节的指纹：用来区分"题被答掉了"和"页面整个跳走了"
@@ -407,108 +442,100 @@ if (window.self === window.top) { // 防 iframe 多次注入，只在顶层运�
     unlockPage();
     if (layer) {
       layer.style.display = 'none';
-      layer.dataset.triedMask = '0';
       layer.dataset.ghostSince = '';
+      layer.dataset.manualHint = '';
     }
     isPopupAlarmed = false;
     resumeVideo();
   }
 
-  // 🎯 主入口：嗅探 -> LLM -> 穷举，交一次卷后自动收尾
+  // 🎯 主入口：嗅探 -> LLM 采样投票，交一次卷后收尾。
+  // 刻意不做选项穷举：每次错误作答都会计入成绩，穷举会显著拉低分数。
+  // 两层都没拿到可靠答案时，保留弹窗提醒人工作答。
   async function handlePopupQuiz(layer) {
     if (!layer || layer.dataset.busy === '1') return;
 
     const inputs = quizInputs(layer);
     if (!inputs.length || !quizSubmitBtn(layer)) return; // 还没渲染完，或只是空壳
 
-    const sniff = sniffMask(layer, inputs);
-    if (!sniff) log(`⚠️ 嗅探未命中（${layer.dataset.sniffFail || '未知原因'}），转入兜底`);
-
-    const tried = Number(layer.dataset.triedMask || 0);
     const qSig = (layer.querySelector('.ti-q-c')?.innerText || '').trim();
     const sec0 = sectionKey();
-    const total = (1 << inputs.length) - 1;
-    const MAX_TRY = 24;
 
-    // 候选顺序：嗅探命中就只交它自己（多交只会把正确答案覆盖掉）；
-    // 否则先问 LLM，再退而求其次逐个试合法组合。
-    const order = [];
-    let llmMask = null;
+    let candidate = null;
+    const sniff = sniffMask(layer, inputs);
     if (sniff) {
-      order.push(sniff.mask);
+      candidate = { mask: sniff.mask, letters: sniff.letters, source: '内存嗅探' };
     } else {
-      const llm = await llmPopupMask(layer, inputs).catch(() => null);
-      if (llm) {
-        llmMask = llm.mask;
-        order.push(llm.mask);
-        log(`🤖 LLM 建议 ${llm.letters}，优先提交`);
+      const c = Store.get('llmConfig', null);
+      const llmReady = Store.get('llmEnabled', false) && c && c.baseUrl && c.apiKey;
+      if (!llmReady) {
+        log('⚠️ 嗅探未命中且 LLM 未启用，不作答（勾选 LLM答题并配置后可自动作答，否则请手动作答）');
+        manualAlarm(layer);
+        return;
       }
-      for (let m = 1; m <= total && order.length < MAX_TRY + 1; m++) {
-        if ((tried & m) || !maskAchievable(inputs, m)) continue;
-        if (!order.includes(m)) order.push(m);
+      log(`⚠️ 嗅探未命中（${layer.dataset.sniffFail || '未知原因'}），LLM 采样投票中...`);
+      const llm = await llmPopupMaskVote(layer, inputs).catch(() => null);
+      if (llm) {
+        candidate = { mask: llm.mask, letters: llm.letters, source: 'LLM投票' };
+      } else {
+        log('⚠️ LLM 未能给出一致答案，不提交（避免错误作答拉低分数），请手动作答');
+        manualAlarm(layer);
+        return;
       }
     }
-    if (!order.length) return;
 
     layer.dataset.busy = '1';
     let accepted = false;
     try {
-      for (const mask of order) {
-        if (!popupVisible(document.querySelector(QUIZ_SEL))) break;
+      if (!popupVisible(document.querySelector(QUIZ_SEL))) {
+        accepted = true; // 等待采样期间弹窗已消失（被人答掉/页面跳转），无需处理
+      } else {
         const cur = quizInputs(layer);
-        if (cur.length !== inputs.length) break;                      // 结构变了，交给主循环重来
-        if ((layer.querySelector('.ti-q-c')?.innerText || '').trim() !== qSig) break; // 换题了
-
-        // ⚠️ 每轮都重新取按钮：站点可能在提交后重新渲染整个题目块，旧引用会变成废节点
         const btn = quizSubmitBtn(layer);
-        if (!btn) break;
+        // ⚠️ 题面/结构在采样期间变了就放弃这一轮，交给主循环重来；
+        // 每轮重新取按钮：站点可能在提交后重新渲染整个题目块，旧引用会变成废节点
+        if (cur.length === inputs.length && btn
+            && (layer.querySelector('.ti-q-c')?.innerText || '').trim() === qSig) {
+          log(`🎯 ${candidate.source}命中 ${candidate.letters}，提交…`);
+          const before = layerText(layer);
+          applyMask(cur, candidate.mask);
+          await wait(200);
+          clickHard(btn);
+          await wait(1200);
 
-        const bits = mask.toString(2).padStart(inputs.length, '0');
-        if (sniff && mask === sniff.mask) log(`🎯 内存嗅探命中 ${sniff.letters}，提交…`);
-        else if (mask === llmMask) log(`🤖 LLM 答案 ${maskLetters(cur, mask)}，提交…`);
-        else log(`🔨 尝试组合 ${bits}`);
-
-        const before = layerText(layer);
-        applyMask(cur, mask);
-        layer.dataset.triedMask = String(Number(layer.dataset.triedMask || 0) | mask);
-        await wait(200);
-        clickHard(btn);
-        await wait(1200);
-
-        if (!popupVisible(document.querySelector(QUIZ_SEL))) {
-          // 弹窗真没了也可能是"页面整体跳走了"，那不是我们答对的
-          if (sectionKey() !== sec0) log(`↩️ 弹窗消失但页面已跳转（${bits}），不计为作答成功`);
-          else log(`✅ 弹窗已关闭（${bits}），作答成功`);
-          accepted = true;
-          break;
+          if (!popupVisible(document.querySelector(QUIZ_SEL))) {
+            // 弹窗真没了也可能是"页面整体跳走了"，那不是我们答对的
+            if (sectionKey() !== sec0) log('↩️ 弹窗消失但页面已跳转，不计为作答成功');
+            else { log('✅ 弹窗已关闭，作答成功'); accepted = true; }
+          } else {
+            // 🎯 题目块内容变了 = 站点已受理这次交卷（优课的弹窗答完不消失，只贴结果）
+            const after = layerText(layer);
+            if (after !== before) {
+              log(`🎯 交卷已受理${verdict(after)}`);
+              accepted = true;
+            }
+          }
         }
-
-        // 🎯 题目块内容变了 = 站点已受理这次交卷
-        const after = layerText(layer);
-        if (after !== before) {
-          log(`🎯 交卷已受理（${bits}）${verdict(after)}，自动收尾`);
-          accepted = true;
-          break;
-        }
-        // 内容没变 = 这次点击没被受理，换下一个候选再试
       }
 
       if (!accepted) {
-        log('⚠️ 交卷没有收到站点响应，已直接收尾（诊断如下）');
+        log('⚠️ 交卷未被受理，保留弹窗请人工检查（诊断如下）');
         quizDiagnose(layer);
       }
     } catch (e) {
       console.error(e);
     } finally {
-      finishPopupQuiz(layer); // 🧹 无论结果如何都自动收尾
+      // 只在已受理时收尾；未受理保留弹层，避免把没答的题藏起来
+      if (accepted) finishPopupQuiz(layer);
       layer.dataset.busy = '0';
     }
   }
 
-  function maskLetters(inputs, mask) {
-    const out = [];
-    inputs.forEach((inp, j) => { if (mask & (1 << j)) out.push(String.fromCharCode(65 + j)); });
-    return out.join('');
+  // 🙋 无可靠答案来源时的人工接管提醒（每个弹窗轮次只提醒一次）
+  function manualAlarm(layer) {
+    if (layer.dataset.manualHint === '1') return;
+    layer.dataset.manualHint = '1';
+    speak('弹窗小题请手动作答');
   }
 
   // ==================== 7. 章节导航（连播） ====================
@@ -802,24 +829,62 @@ if (window.self === window.top) { // 防 iframe 多次注入，只在顶层运�
       return null;
     }
 
-    log('📡 正在调用 LLM API...');
+    log('📡 正在调用 LLM（3 路采样投票）...');
     const prompt = buildPrompt(questions);
-    const res = await llmChat([
-      { role: 'system', content: '你是一个专业的答题助手，请严格按照要求的格式返回答案。' },
-      { role: 'user', content: prompt }
-    ], 0.3);
+    const ask = async () => {
+      const res = await llmChat([
+        { role: 'system', content: '你是一个专业的答题助手，请严格按照要求的格式返回答案。' },
+        { role: 'user', content: prompt }
+      ], 0.3);
+      if (!res || !res.ok) {
+        console.log('[UOOC助手-AI] 采样失败:', res && (res.error || res.status));
+        return null;
+      }
+      return (res.data && res.data.choices && res.data.choices[0] &&
+        res.data.choices[0].message && res.data.choices[0].message.content) || '';
+    };
 
-    if (!res || !res.ok) {
-      const why = res ? (res.error || `HTTP ${res.status}`) : '未知错误';
-      log(`❌ LLM 调用失败: ${why}`);
-      alert(`AI答题失败: ${why}\n请检查API配置是否正确。`);
+    let parsed = (await Promise.all([ask(), ask(), ask()]))
+      .map((t) => (t ? parseAnswers(t, questions) : null));
+    if (parsed.every((p) => !p)) {
+      alert('AI答题失败：3 路采样全部失败。\n请检查API配置是否正确（设置页可测试连接）。');
       return null;
     }
 
-    const answerText = (res.data && res.data.choices && res.data.choices[0] &&
-      res.data.choices[0].message && res.data.choices[0].message.content) || '';
-    console.log('[UOOC助手-AI] LLM返回:', answerText);
-    return parseAnswers(answerText, questions);
+    let votes = voteExamAnswers(parsed, questions);
+    if (votes.some((v) => v && v.tied)) {
+      log('🗳️ 部分题目票数并列，补问 2 轮后按多数决...');
+      parsed = parsed.concat((await Promise.all([ask(), ask()]))
+        .map((t) => (t ? parseAnswers(t, questions) : null)));
+      votes = voteExamAnswers(parsed, questions);
+    }
+
+    // 仍并列的题取票数最高的候选（先到者胜），保证不留空卷
+    const answers = votes.map((v) => (v ? v.answer : null));
+    const agreed = answers.filter(Boolean).length;
+    log(`🗳️ 投票完成：${agreed}/${questions.length} 题达成多数一致`);
+    return answers;
+  }
+
+  // 对每道题的多次作答结果投票。返回每题 {answer, tied}；无人作答的题为 null。
+  function voteExamAnswers(parsedArr, questions) {
+    return questions.map((q, qi) => {
+      const groups = new Map();
+      for (const p of parsedArr) {
+        const ans = p && p[qi];
+        if (!ans || !ans.length) continue;
+        const key = ans.map((s) => s.toUpperCase()).sort().join(',');
+        if (!groups.has(key)) groups.set(key, { key, count: 0, answer: ans });
+        groups.get(key).count++;
+      }
+      if (!groups.size) return null;
+      let best = null;
+      for (const g of groups.values()) {
+        if (!best || g.count > best.count) best = g;
+      }
+      const tied = [...groups.values()].filter((g) => g.count === best.count).length > 1;
+      return { answer: best.answer, tied };
+    });
   }
 
   function fillAnswers(questions, answers) {
@@ -996,7 +1061,7 @@ if (window.self === window.top) { // 防 iframe 多次注入，只在顶层运�
               <div class="uooc-row">
                 <label title="自动播放并拦截站点暂停（空格键切换）"><input type="checkbox" id="uooc-play-on">播放</label>
                 <label title="播完自动跳下一节"><input type="checkbox" id="uooc-continue-on">连播</label>
-                <label title="视频弹窗小题自动作答（嗅探/LLM/穷举）"><input type="checkbox" id="uooc-popup-on">弹窗秒答</label>
+                <label title="视频弹窗小题自动作答（内存嗅探 → LLM采样投票；不做穷举，答不了会提醒人工）"><input type="checkbox" id="uooc-popup-on">弹窗秒答</label>
               </div>
             </div>
             <div class="uooc-row" id="uooc-llm-row">
@@ -1225,6 +1290,18 @@ if (window.self === window.top) { // 防 iframe 多次注入，只在顶层运�
 
       if (isCoolingDown) return;
 
+      // 🛡️ 智能验证弹层（阿里云验证码等）在屏时冻结一切自动动作：
+      // 不答题、不清遮罩——误杀验证层会导致整页无法交卷
+      if (verifyLayerVisible()) {
+        if (!isVerifyAlarmed) {
+          isVerifyAlarmed = true;
+          log('🛡️ 检测到智能验证弹窗，已暂停自动作答与清理，请手动完成验证');
+          speak('请完成验证');
+        }
+        return;
+      }
+      isVerifyAlarmed = false;
+
       // ------------------------------------------
       // 第零优先级：弹窗判定与主循环避让
       // ------------------------------------------
@@ -1256,11 +1333,11 @@ if (window.self === window.top) { // 防 iframe 多次注入，只在顶层运�
 
         isPopActive = popupVisible(popBox) && popBox.dataset.solved !== 'true';
 
-        // 🔁 弹窗由不可见 -> 可见 = 新一轮，清空上一轮的穷举记录，允许重新作答
+        // 🔁 弹窗由不可见 -> 可见 = 新一轮，复位状态允许重新作答
         if (isPopActive && !wasPopActive) {
-          popBox.dataset.triedMask = '0';
           popBox.dataset.busy = '0';
           popBox.dataset.alarmSince = '';
+          popBox.dataset.manualHint = '';
           isPopupAlarmed = false;
         }
 
