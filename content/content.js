@@ -2083,6 +2083,11 @@ if (window.self === window.top) { // 防 iframe 多次注入，只在顶层运�
                   <input type="checkbox" id="uooc-gate-on">
                   <span class="uooc-switch"></span>
                 </label>
+                <label class="uooc-setting" title="引擎运行且处于课程讨论视图时，AI 生成回复并自动发帖（需要 LLM 答题已开启）">
+                  <span class="uooc-setting-text"><span class="uooc-setting-title">讨论区发帖</span><span class="uooc-setting-desc">AI 生成回复并自动发帖</span></span>
+                  <input type="checkbox" id="uooc-disc-on">
+                  <span class="uooc-switch"></span>
+                </label>
               </div>
               <button id="uooc-answer-btn" title="提取试卷题目并用 LLM 投票作答">${ICONS.spark}<span>开始 AI 答题</span></button>
               <button id="uooc-copy-btn" title="在已提交的测验回顾页，复制题目与答案到剪切板">${ICONS.copy}<span>复制题目答案</span></button>
@@ -2107,26 +2112,44 @@ if (window.self === window.top) { // 防 iframe 多次注入，只在顶层运�
     const startBtn = document.getElementById('uooc-start-btn');
 
     // ---- 事件绑定 ----
-    document.getElementById('uooc-refresh-btn').onclick = () => {
+    // 所有绑定经过 on() 容错：任一元素缺失只跳过该绑定并告警，
+    // 绝不让异常中断 buildPanel（否则后续绑定集体消失）。
+    const on = (id, handler, evt = 'click') => {
+      const el = document.getElementById(id);
+      if (!el) {
+        console.warn('[UOOC助手Pro] 面板缺少控件 #' + id + '，跳过绑定');
+        return;
+      }
+      el.addEventListener(evt, handler);
+    };
+
+    on('uooc-refresh-btn', () => {
       log('🔄 正在强制刷新页面...');
       setTimeout(() => location.reload(), 200);
-    };
+    });
 
-    document.getElementById('uooc-unlock-btn').onclick = () => {
+    on('uooc-unlock-btn', () => {
       finishPopupQuiz(document.querySelector('#quizLayer, .smallTest-view'));
       log('🧹 已清理遮罩、解锁页面并尝试恢复播放');
-    };
+    });
 
-    startBtn.onclick = () => (engineStarted ? stopEngine() : startEngine(false));
+    on('uooc-start-btn', () => (engineStarted ? stopEngine() : startEngine(false)));
 
-    document.getElementById('uooc-set-btn').onclick = openLLMSettings;
-    document.getElementById('uooc-llm-set').onclick = openLLMSettings;
+    on('uooc-set-btn', openLLMSettings);
+    on('uooc-llm-set', openLLMSettings);
 
-    document.getElementById('uooc-copy-btn').onclick = copyAnswersClick;
+    on('uooc-copy-btn', copyAnswersClick);
 
-    // 复选框 <-> 存储
+    // 复选框 <-> 存储。
+    // ⚠️ 必须逐个容错：任何 id 在面板 HTML 里缺失时，getElementById 返回 null，
+    // 若直接 el.addEventListener 会抛异常并中断 buildPanel —— 后续所有绑定
+    // （拖拽/胶囊/最小化/答题按钮）会集体消失。v3.1.1~3.1.2 胶囊打不开即此原因。
     const bindToggle = (id, key, onChange) => {
       const el = document.getElementById(id);
+      if (!el) {
+        console.warn('[UOOC助手Pro] 面板缺少控件 #' + id + '，跳过绑定');
+        return;
+      }
       el.addEventListener('change', async (e) => {
         await Store.set({ [key]: e.target.checked });
         if (onChange) onChange(e.target.checked);
@@ -2148,13 +2171,13 @@ if (window.self === window.top) { // 防 iframe 多次注入，只在顶层运�
     bindToggle('uooc-gate-on', 'gateOn');
     bindToggle('uooc-disc-on', 'discussionOn');
 
-    document.getElementById('uooc-rate-value').addEventListener('change', (e) => {
+    on('uooc-rate-value', (e) => {
       Store.set({ rateValue: Number(e.target.value) || 2 });
       const v = currentVideo();
       if (v && Store.get('rateOn', true)) v.playbackRate = Number(e.target.value) || 2;
-    });
+    }, 'change');
 
-    document.getElementById('uooc-llm-on').addEventListener('change', async (e) => {
+    on('uooc-llm-on', async (e) => {
       await Store.set({ llmEnabled: e.target.checked });
       log('🤖 LLM答题 ' + (e.target.checked ? '已启用' : '已禁用'));
       if (e.target.checked) {
@@ -2165,14 +2188,14 @@ if (window.self === window.top) { // 防 iframe 多次注入，只在顶层运�
         }
       }
       updateAnswerBtnState();
-    });
+    }, 'change');
 
-    document.getElementById('uooc-log-clear').onclick = () => {
+    on('uooc-log-clear', () => {
       const l = document.getElementById('uooc-log');
       if (l) { l.innerHTML = ''; l.dataset.empty = '1'; }
-    };
+    });
 
-    document.getElementById('uooc-answer-btn').onclick = async function () {
+    on('uooc-answer-btn', async function () {
       if (!Store.get('llmEnabled', false)) {
         alert('请先打开"LLM 答题"开关！');
         return;
@@ -2192,7 +2215,7 @@ if (window.self === window.top) { // 防 iframe 多次注入，只在顶层运�
         btn.innerHTML = ICONS.x + '<span>答题失败</span>';
         setTimeout(() => resetAnswerBtn(btn), 2000);
       }
-    };
+    });
 
     function resetAnswerBtn(btn) {
       btn.disabled = false;
@@ -2224,7 +2247,7 @@ if (window.self === window.top) { // 防 iframe 多次注入，只在顶层运�
     }
 
     // 面板拖拽（标题栏起手）；capture 阶段监听，先于页面处理器
-    dragBar.addEventListener('mousedown', (e) => {
+    if (dragBar) dragBar.addEventListener('mousedown', (e) => {
       e.preventDefault();
       panelDrag = { sx: e.clientX, sy: e.clientY, ix: panel.offsetLeft, iy: panel.offsetTop };
       dragInProgress = true;
@@ -2252,7 +2275,7 @@ if (window.self === window.top) { // 防 iframe 多次注入，只在顶层运�
     }, true);
 
     // 胶囊：Pointer Capture 下拖拽；松手位移 ≤6px 判定为点击展开
-    ball.addEventListener('pointerdown', (e) => {
+    if (ball) ball.addEventListener('pointerdown', (e) => {
       if (e.button !== 0) return;
       e.preventDefault();
       try { ball.setPointerCapture(e.pointerId); } catch (err) { /* 忽略 */ }
@@ -2282,7 +2305,7 @@ if (window.self === window.top) { // 防 iframe 多次注入，只在顶层运�
     ball.addEventListener('pointercancel', () => { ballDrag = null; dragInProgress = false; });
     // 兜底：pointer 事件被环境干扰时，click 仍可展开（500ms 去重防双触发）
     ball.addEventListener('click', () => tryExpandByUser());
-    document.getElementById('uooc-min-btn').addEventListener('click', () => minimizePanel());
+    on('uooc-min-btn', () => minimizePanel());
 
     // ---- 考试页精简：隐藏挂机/视频相关控件 ----
     if (isExamPage()) {
