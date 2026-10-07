@@ -1384,64 +1384,8 @@ if (window.self === window.top) { // 防 iframe 多次注入，只在顶层运�
     },
     async commit(cid, tid, answers) {
       return this.postForm('/exam/commit', { cid, tid, data: JSON.stringify(answers) });
-    },
-    async markVideoLearn(cid, learn, videoLength, videoPos) {
-      const j = await this.postForm('/home/learn/markVideoLearn', {
-        chapter_id: learn.chapter_id, cid, network: 3, resource_id: learn.resource_id,
-        section_id: learn.section_id, source: 1, subsection_id: learn.subsection_id,
-        video_length: videoLength, video_pos: videoPos
-      });
-      return !!(j && j.data && j.data.finished == 1);
     }
   };
-
-  // ⚡ 极速完成：跳过播放，直接上报进度到 100%。失败（含服务端不判定完成）
-  // 会分段补报几次，仍失败则回退普通播放，且本节不再重试。
-  let fastBusy = false;
-  const fastDoneKeys = new Set();
-
-  async function fastTrack(video) {
-    if (fastBusy) return;
-    const key = sectionKey() || location.hash;
-    if (fastDoneKeys.has(key)) { resumeVideo(); return; }
-    fastBusy = true;
-    try {
-      const cid = UOOC_API.cid();
-      if (!cid) throw new Error('未取得课程 cid');
-      const learn = await UOOC_API.getCourseLearn(cid);
-      if (!learn || !learn.chapter_id) throw new Error('getCourseLearn 无定位参数');
-
-      let len = Math.round(video.duration || 0);
-      if (!len) {
-        try {
-          const src = JSON.parse(document.querySelector('div[uooc-video]')?.getAttribute('source') || 'null');
-          len = Math.round(src?.videos?.[0]?.duration || 0);
-        } catch (e) { /* 忽略 */ }
-      }
-      len = len > 0 ? len : 100;
-
-      log(`⚡ 极速模式：直接上报本节完成（${len}s）...`);
-      let ok = await UOOC_API.markVideoLearn(cid, learn, len, len);
-      if (!ok) {
-        // 服务端可能校验进度递增，分段补报兜底
-        for (let i = 1; i <= 20 && !ok; i++) {
-          await wait(1200);
-          ok = await UOOC_API.markVideoLearn(cid, learn, len, Math.round((len * i) / 20));
-        }
-      }
-      if (!ok) throw new Error('服务端未判定完成');
-
-      fastDoneKeys.add(key);
-      log('⚡ 极速完成本节，跳转下一节');
-      navigate('极速完成');
-    } catch (e) {
-      fastDoneKeys.add(key);
-      log('⚠️ 极速模式不可用（' + (e.message || e) + '），本节回退普通播放');
-      resumeVideo();
-    } finally {
-      setTimeout(() => { fastBusy = false; }, 1500);
-    }
-  }
 
   // ⚡ 接口直答：getTaskPaper 取卷 → 泄漏答案/LLM 投票 → commit 逐题判分 →
   // 错题接口级穷举 → 整卷提交。任何一步失败返回 null，闯关流水线回退页面流程。
@@ -1546,6 +1490,281 @@ if (window.self === window.top) { // 防 iframe 多次注入，只在顶层运�
     commits++;
     await UOOC_API.commit(cid, tid, finalAnswers);
     return { right, total: paper.length, commits };
+  }
+
+  // ==================== 9.9 讨论区：AI 生成回复并自动发帖 ====================
+  // 思路取自 fastuooc 的讨论实现：hash 路由识别讨论视图，页面世界（MAIN world）
+  // 里攀爬 Angular scope 取帖子标题/正文、填充 DIR_EDITORS/textarea，
+  // 经 courseService.discReply 提交。已回过的帖子持久化去重，回完自动回学习视图。
+
+  // content script 在隔离世界访问不到页面 angular/DIR_EDITORS，
+  // 通过 background 的 chrome.scripting(world:'MAIN') 在页面世界执行函数（不受页面 CSP 限制）。
+  function pageEval(fn, args) {
+    return new Promise((resolve) => {
+      try {
+        chrome.runtime.sendMessage({ type: 'PAGE_EVAL', fn: fn.toString(), args: args || [] })
+          .then((r) => resolve(r && 'result' in r ? r.result : null))
+          .catch(() => resolve(null));
+      } catch (e) {
+        resolve(null);
+      }
+    });
+  }
+
+  // 在页面世界执行：探测讨论列表 + 帖子详情（标题/正文已剥 HTML）
+  function pgProbe() {
+    function climb(scope, pred) {
+      let cur = scope;
+      for (let i = 0; cur && i < 12; i++) {
+        try { if (pred(cur)) return cur; } catch (e) { /* 忽略 */ }
+        cur = cur.$parent;
+      }
+      return null;
+    }
+    function strip(html, cap) {
+      const d = document.createElement('div');
+      d.innerHTML = String(html || '');
+      d.querySelectorAll('br').forEach((n) => n.replaceWith(document.createTextNode('\n')));
+      const t = (d.textContent || '').replace(/[ \t]+/g, ' ').replace(/\n{3,}/g, '\n\n').trim();
+      return t.slice(0, cap);
+    }
+    const out = { hasAngular: !!window.angular };
+    try {
+      if (window.angular) {
+        const lnodes = document.querySelectorAll(
+          '[ng-repeat*="chapter_tiezi in questionList[2]"],[ng-repeat*="tiezi in studentList[0]"],[ng-repeat*="tiezi in comList"],[uooc-pager],.Discuz');
+        for (const n of lnodes) {
+          const s = climb(window.angular.element(n).scope(), (c) =>
+            (typeof c.getPageDiscussion === 'function' && c.questionListPaper) ||
+            (typeof c.getCourseDiscussionList === 'function' && c.noteListPaper));
+          if (s) {
+            const list = Array.isArray(s.studentList && s.studentList[0]) ? s.studentList[0]
+              : Array.isArray(s.comList) ? s.comList
+              : Array.isArray(s.questionList && s.questionList[2]) ? s.questionList[2] : [];
+            out.list = list.map((it) => ({
+              tid: String(it.tid || it.thread_id || it.topic_id || it.id || ''),
+              title: strip(it.subject || it.title || it.content || '', 100)
+            })).filter((x) => x.tid);
+            const pages = (s.noteListPaper && (s.noteListPaper.total || s.noteListPaper.pages))
+              || (s.questionListPaper && s.questionListPaper[2] && (s.questionListPaper[2].pageCount || s.questionListPaper[2].pages)) || 1;
+            out.pages = Number(pages) || 1;
+            break;
+          }
+        }
+        const dnodes = document.querySelectorAll(
+          '[thread-detail],[ng-bind-html*="threads.content"],.discussionDesc,.thesis-content,.discuss-header');
+        for (const n of dnodes) {
+          const s = climb(window.angular.element(n).scope(), (c) =>
+            c.threads && (typeof c.replay === 'function' || typeof c.getList === 'function' || typeof c.handleRelease === 'function'));
+          if (s) {
+            const t = s.threads || {};
+            out.detail = {
+              tid: String(t.tid || t.id || ''),
+              title: strip(t.subject || t.title || '', 150),
+              content: strip(t.content || (n.innerText || ''), 1500)
+            };
+            break;
+          }
+        }
+      }
+    } catch (e) { out.err = String(e); }
+    return out;
+  }
+
+  // 在页面世界执行：填充编辑器并经 courseService.discReply 发帖
+  function pgSubmitReply(cid, tid, content) {
+    function climb(scope, pred) {
+      let cur = scope;
+      for (let i = 0; cur && i < 12; i++) {
+        try { if (pred(cur)) return cur; } catch (e) { /* 忽略 */ }
+        cur = cur.$parent;
+      }
+      return null;
+    }
+    if (!window.angular) return Promise.resolve({ __err: '页面 Angular 不可用' });
+    let detail = null;
+    const nodes = document.querySelectorAll(
+      '[thread-detail],[ng-bind-html*="threads.content"],.discussionDesc,.thesis-content,.discuss-header');
+    for (const n of nodes) {
+      const s = climb(window.angular.element(n).scope(), (c) =>
+        c.threads && (typeof c.replay === 'function' || typeof c.getList === 'function' || typeof c.handleRelease === 'function'));
+      if (s) { detail = s; break; }
+    }
+    if (!detail) return Promise.resolve({ __err: '未找到帖子详情 scope' });
+
+    // 编辑器填充：DIR_EDITORS（富文本）+ scope.noteContent + textarea 双保险
+    const editor = window.DIR_EDITORS && (window.DIR_EDITORS.noteEditorAll || window.DIR_EDITORS.noteEditor);
+    if (editor && typeof editor.setContent === 'function') {
+      try { editor.setContent(content); } catch (e) { /* 忽略 */ }
+    }
+    if ('noteContent' in detail) detail.noteContent = content;
+    document.querySelectorAll('textarea[ng-model="content"], textarea[ng-model="noteContent"]').forEach((ta) => {
+      const set = Object.getOwnPropertyDescriptor(window.HTMLTextAreaElement.prototype, 'value');
+      if (set && set.set) set.set.call(ta, content); else ta.value = content;
+      try {
+        const es = window.angular.element(ta).scope();
+        if (es && 'content' in es) { es.content = content; if (es.$evalAsync) es.$evalAsync(); }
+        if (es && 'noteContent' in es) { es.noteContent = content; if (es.$evalAsync) es.$evalAsync(); }
+      } catch (e) { /* 忽略 */ }
+      ta.dispatchEvent(new Event('input', { bubbles: true }));
+      ta.dispatchEvent(new Event('change', { bubbles: true }));
+    });
+
+    let injector = null;
+    try { injector = window.angular.element(document.body || document.documentElement).injector(); } catch (e) { /* 忽略 */ }
+    const courseService = injector && injector.get('courseService');
+    if (!courseService || typeof courseService.discReply !== 'function') {
+      return Promise.resolve({ __err: '未找到 courseService.discReply' });
+    }
+    return Promise.resolve(courseService.discReply({ cid: String(cid), tid: String(tid), content, images: null }))
+      .then(() => {
+        // 触发详情刷新，让站点状态机同步
+        try {
+          if (typeof detail.getList === 'function') detail.getList();
+          else if (typeof detail.getDetail === 'function') detail.getDetail();
+        } catch (e) { /* 忽略 */ }
+        return { ok: true };
+      })
+      .catch((e) => ({ __err: 'discReply 失败: ' + String(e) }));
+  }
+
+  // 讨论路由（hash 解析，无需页面世界）
+  function discussionRoute() {
+    const segs = location.hash.replace(/^#\/?/, '').split('/').map((s) => {
+      try { return decodeURIComponent(s.split(/[?#;]/)[0]); } catch (e) { return s; }
+    });
+    const low = segs.map((s) => s.toLowerCase());
+    const cid = (location.pathname.match(/\/home\/course(?:\/new)?\/(\d+)/i) || [])[1]
+      || (location.href.match(/index#\/(\d+)\//) || [])[1] || null;
+    const isDetail = low.includes('discussdetail');
+    const isList = !isDetail && (low[0] === 'discuss' || low[0] === 'discusscom');
+    const nums = segs.filter((s) => /^\d+$/.test(s) && s !== cid);
+    return {
+      active: isDetail || isList,
+      isDetail,
+      isList,
+      cid,
+      mode: (low[0] === 'discusscom' || (isDetail && low[0] === 'discussdetail')) ? 'old' : 'new',
+      tid: isDetail ? (nums[0] || '') : ''
+    };
+  }
+  function navDiscussionList(mode) {
+    location.hash = mode === 'old' ? '#/discusscom' : '#/discuss';
+  }
+  function navDiscussionDetail(route, tid) {
+    location.hash = route.mode === 'old'
+      ? '#/discussdetail/com/' + encodeURIComponent(tid)
+      : '#/discuss/' + encodeURIComponent(tid) + '/' + encodeURIComponent(route.cid) + '/discussDetail';
+  }
+
+  // 已回帖持久化去重（按课程，最多留 80 条）
+  function discRepliedGet() {
+    const all = Store.get('discReplied', {}) || {};
+    return Array.isArray(all[UOOC_API.cid() || 'default']) ? all[UOOC_API.cid() || 'default'] : [];
+  }
+  function discRepliedAdd(tid) {
+    const all = Store.get('discReplied', {}) || {};
+    const cid = UOOC_API.cid() || 'default';
+    const arr = Array.isArray(all[cid]) ? all[cid] : [];
+    if (!arr.includes(tid)) arr.push(tid);
+    if (arr.length > 80) arr.splice(0, arr.length - 80);
+    all[cid] = arr;
+    Store.set({ discReplied: all });
+  }
+
+  async function genDiscussionReply(title, content) {
+    const sys = [
+      '你是一名认真参与在线课程讨论的学生。',
+      '根据帖子题目和正文，写一条有价值、具体、自然的中文回复。',
+      '回应原帖核心问题，补充方法、例子或容易忽略的角度，避免空泛赞同、重复原文和机械套话。',
+      '只输出纯文本正文，不要 Markdown、HTML、引号或任何前缀，也不要提及 AI。',
+      '80 到 200 字，语气自然，像真实学生参与讨论。'
+    ].join('\n');
+    const res = await llmChat([
+      { role: 'system', content: sys },
+      { role: 'user', content: '帖子题目：\n' + title + '\n\n帖子正文：\n' + content }
+    ], 0.7);
+    if (!res || !res.ok) {
+      log('🤖 LLM 调用失败：' + ((res && (res.error || 'HTTP ' + res.status)) || '未知错误'));
+      return null;
+    }
+    const text = ((res.data && res.data.choices && res.data.choices[0] &&
+      res.data.choices[0].message && res.data.choices[0].message.content) || '')
+      .replace(/[*_`~#>]/g, '').trim();
+    return text.slice(0, 500) || null;
+  }
+
+  let discState = null;
+  let lastLearnHash = '';
+
+  async function discussionTick(route) {
+    if (!discState) {
+      discState = { busy: false, done: false, tried: new Set(), failCount: 0, coolUntil: 0 };
+      log('💬 进入讨论区：AI 将为未回复的帖子自动生成并发帖');
+    }
+    if (discState.busy || discState.done || Date.now() < discState.coolUntil) return;
+    if (!Store.get('llmEnabled', false)) {
+      if (!discState.llmWarned) {
+        discState.llmWarned = true;
+        log('⚠️ 讨论区发帖需要 LLM：请打开「LLM 答题」并配置好 API');
+      }
+      return;
+    }
+
+    discState.busy = true;
+    try {
+      const probe = await pageEval(pgProbe);
+      if (!probe || probe.__err) throw new Error((probe && probe.__err) || '页面探针失败');
+      const replied = discRepliedGet();
+
+      // 详情视图：回帖
+      if (probe.detail && probe.detail.tid) {
+        const { tid, title, content } = probe.detail;
+        if (!title && !content) throw new Error('帖子内容尚未加载');
+        if (replied.includes(tid) || discState.tried.has(tid)) {
+          navDiscussionList(route.mode); // 已回过：回列表找下一个
+          return;
+        }
+        log(`💬 正在回复帖子：${(title || tid).slice(0, 24)}`);
+        const reply = await genDiscussionReply(title, content);
+        if (!reply) throw new Error('LLM 未返回回复内容');
+        const res = await pageEval(pgSubmitReply, [route.cid || '', tid, reply]);
+        if (!res || res.__err) throw new Error((res && res.__err) || '发帖失败');
+        discRepliedAdd(tid);
+        discState.tried.add(tid);
+        log(`✅ 讨论回复已发布（${tid}），稍后回列表继续`);
+        discState.coolUntil = Date.now() + 8000 + Math.floor(Math.random() * 12000);
+        await wait(1500);
+        navDiscussionList(route.mode);
+        return;
+      }
+
+      // 列表视图：找下一个未回帖
+      if (route.isList) {
+        const next = (probe.list || []).find((it) =>
+          it.tid && !replied.includes(it.tid) && !discState.tried.has(it.tid));
+        if (!next) {
+          discState.done = true;
+          log('💬 讨论区当前列表的帖子已全部回复完成');
+          speak('讨论完成');
+          if (lastLearnHash) location.hash = lastLearnHash; // 回学习视图继续挂机
+          return;
+        }
+        navDiscussionDetail(route, next.tid);
+        return;
+      }
+    } catch (e) {
+      discState.failCount++;
+      log('⚠️ 讨论区处理失败（' + (e.message || e) + '）');
+      if (discState.failCount >= 6) {
+        discState.done = true;
+        log('❌ 讨论区连续失败，本页不再自动发帖（重新进入讨论区可重试）');
+      } else {
+        discState.coolUntil = Date.now() + 5000;
+      }
+    } finally {
+      discState.busy = false;
+    }
   }
 
   // ==================== 10. 复制题目答案（已提交测验的回顾页） ====================
@@ -1847,11 +2066,6 @@ if (window.self === window.top) { // 防 iframe 多次注入，只在顶层运�
                 <input type="checkbox" id="uooc-popup-on">
                 <span class="uooc-switch"></span>
               </label>
-              <label class="uooc-setting" title="实验性：通过课程接口直接上报视频完成，失败自动回退普通播放">
-                <span class="uooc-setting-text"><span class="uooc-setting-title">极速完成</span><span class="uooc-setting-desc">接口直报，跳过播放</span></span>
-                <input type="checkbox" id="uooc-fast-on">
-                <span class="uooc-switch"></span>
-              </label>
             </div>
             <div id="uooc-ai-sec">
               <div class="uooc-sec-head">
@@ -1932,7 +2146,7 @@ if (window.self === window.top) { // 防 iframe 多次注入，只在顶层运�
     bindToggle('uooc-continue-on', 'continueOn');
     bindToggle('uooc-popup-on', 'popupSolveOn');
     bindToggle('uooc-gate-on', 'gateOn');
-    bindToggle('uooc-fast-on', 'fastModeOn');
+    bindToggle('uooc-disc-on', 'discussionOn');
 
     document.getElementById('uooc-rate-value').addEventListener('change', (e) => {
       Store.set({ rateValue: Number(e.target.value) || 2 });
@@ -2043,7 +2257,7 @@ if (window.self === window.top) { // 防 iframe 多次注入，只在顶层运�
       'uooc-continue-on': ['continueOn', true],
       'uooc-popup-on': ['popupSolveOn', true],
       'uooc-gate-on': ['gateOn', true],
-      'uooc-fast-on': ['fastModeOn', false],
+      'uooc-disc-on': ['discussionOn', true],
       'uooc-llm-on': ['llmEnabled', false]
     };
     for (const [id, [key, dft]] of Object.entries(map)) {
@@ -2130,6 +2344,14 @@ if (window.self === window.top) { // 防 iframe 多次注入，只在顶层运�
         return;
       }
       isVerifyAlarmed = false;
+
+      // 💬 讨论区接管：引擎运行 + 开关开启 + 当前在讨论视图时，AI 发帖流程独占本循环
+      const disc = discussionRoute();
+      if (disc.active) {
+        if (engineStarted && Store.get('discussionOn', true)) discussionTick(disc);
+        return;
+      }
+      if (location.hash) lastLearnHash = location.hash; // 记录学习视图 hash，讨论完成后返回
 
       // ------------------------------------------
       // 第零优先级：弹窗判定与主循环避让
@@ -2252,11 +2474,7 @@ if (window.self === window.top) { // 防 iframe 多次注入，只在顶层运�
       if (video) {
         noVideoTimer = 0;
         endReached = false; // 有视频在播说明还没到头，解除封顶锁
-        if (engineStarted && Store.get('fastModeOn', false)) {
-          fastTrack(video); // ⚡ 极速模式：接口直报完成（失败自动回退播放）
-        } else {
-          resumeVideo();
-        }
+        resumeVideo();
         return;
       }
 

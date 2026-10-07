@@ -7,7 +7,7 @@ const KEYS = {
   'play-on': 'playOn',
   'continue-on': 'continueOn',
   'popup-on': 'popupSolveOn',
-  'fast-on': 'fastModeOn',
+  'disc-on': 'discussionOn',
   'gate-on': 'gateOn',
   'llm-on': 'llmEnabled'
 };

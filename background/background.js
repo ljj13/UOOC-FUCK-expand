@@ -11,7 +11,7 @@ chrome.runtime.onInstalled.addListener(async () => {
     continueOn: true,
     popupSolveOn: true,
     gateOn: true,
-    fastModeOn: false,
+    discussionOn: true,
     apiDirectOn: true,
     appToken: '',
     llmEnabled: false,
@@ -36,6 +36,27 @@ function normalizeApiUrl(raw) {
   if (!/\/v\d+$/.test(u)) u += '/v1';
   return u + '/chat/completions';
 }
+
+// 页面世界求值：content script 访问不到页面 angular/DIR_EDITORS，
+// 由这里用 chrome.scripting(world:'MAIN') 在页面世界执行（不受页面 CSP 限制）
+chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
+  if (!msg || msg.type !== 'PAGE_EVAL') return;
+  if (!sender.tab || !sender.tab.id) return sendResponse({ result: { __err: '无目标标签页' } });
+  try {
+    chrome.scripting.executeScript({
+      target: { tabId: sender.tab.id },
+      world: 'MAIN',
+      func: new Function('return (' + msg.fn + ')')(),
+      args: msg.args || []
+    }).then((injections) => {
+      const first = injections && injections[0];
+      sendResponse({ result: first && 'result' in first ? first.result : null });
+    }).catch((e) => sendResponse({ result: { __err: String((e && e.message) || e) } }));
+  } catch (e) {
+    sendResponse({ result: { __err: String((e && e.message) || e) } });
+  }
+  return true; // 异步 sendResponse
+});
 
 // LLM 请求统一走 Service Worker：
 // 1) 不受页面 CSP / CORS 限制（需在设置页保存时授予 API 域名的可选权限）；

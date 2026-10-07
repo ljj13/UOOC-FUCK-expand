@@ -54,7 +54,7 @@
 
     <section class="u-card">
       <h2 class="u-card-title">实验性直连接口</h2>
-      <p class="u-card-desc">极速完成（markVideoLearn 直通）与接口直答（getTaskPaper / commit）。默认使用页面登录会话，接口失败都会自动回退页面流程；/exam/ 考试页永不使用接口直答与自动交卷。</p>
+      <p class="u-card-desc">接口直答（getTaskPaper / commit，章节测验闯关前置尝试）。默认使用页面登录会话，接口失败都会自动回退页面流程；/exam/ 考试页永不使用接口直答与自动交卷。</p>
       <div class="u-field">
         <label for="app-token">App Token（可选）</label>
         <input type="password" id="app-token" class="u-input" placeholder="从手机 App 抓包获取的 Bearer Token，Web 会话被拒时附加">
@@ -98,9 +98,9 @@
         <input type="checkbox" id="popup-on">
         <span class="u-switch"></span>
       </label>
-      <label class="u-setting-row" for="fast-on" title="实验性：通过课程接口直接上报视频完成，失败自动回退普通播放">
-        <span class="u-row-text"><span class="u-row-title">极速完成</span><span class="u-row-desc">接口直报，跳过播放（实验性）</span></span>
-        <input type="checkbox" id="fast-on">
+      <label class="u-setting-row" for="disc-on" title="引擎运行且处于课程讨论视图时，AI 生成回复并自动发帖；已回帖持久化去重">
+        <span class="u-row-text"><span class="u-row-title">讨论区</span><span class="u-row-desc">AI 生成回复并自动发帖</span></span>
+        <input type="checkbox" id="disc-on">
         <span class="u-switch"></span>
       </label>
       <label class="u-setting-row" for="api-direct" title="章节测验闯关时优先尝试 getTaskPaper/commit 接口直答，失败自动回退页面流程；/exam/ 考试页不受影响">

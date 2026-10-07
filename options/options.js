@@ -21,7 +21,7 @@ const TOGGLES = {
   'play-on': 'playOn',
   'continue-on': 'continueOn',
   'popup-on': 'popupSolveOn',
-  'fast-on': 'fastModeOn',
+  'disc-on': 'discussionOn',
   'api-direct': 'apiDirectOn',
   'gate-on': 'gateOn'
 };
