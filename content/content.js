@@ -113,6 +113,9 @@ if (window.self === window.top) { // 防 iframe 多次注入，只在顶层运�
     } else {
       logBuf.push(m);
     }
+    // 标题栏停靠条滚动显示最新一条日志
+    const tk = document.getElementById('uooc-dock-ticker');
+    if (tk) tk.textContent = m;
   }
   function flushLog() {
     const l = document.getElementById('uooc-log');
@@ -755,6 +758,20 @@ if (window.self === window.top) { // 防 iframe 多次注入，只在顶层运�
     }
     const ball = document.getElementById('uooc-min-ball');
     if (ball) ball.classList.toggle('running', engineStarted);
+    // 标题栏停靠条同步
+    const dockDot = document.getElementById('uooc-dock-dot');
+    if (dockDot) dockDot.classList.toggle('on', engineStarted);
+    const dockState = document.getElementById('uooc-dock-state');
+    if (dockState) {
+      dockState.textContent = engineStarted ? '运行中' : '未启动';
+      dockState.classList.toggle('on', engineStarted);
+    }
+    const dockStart = document.getElementById('uooc-dock-start');
+    if (dockStart) {
+      dockStart.classList.toggle('running', engineStarted);
+      dockStart.innerHTML = (engineStarted ? ICONS.stop : ICONS.play)
+        + '<span>' + (engineStarted ? '停止挂机' : '启动挂机') + '</span>';
+    }
   }
 
   // ==================== 9. LLM 模块 ====================
@@ -1350,8 +1367,16 @@ if (window.self === window.top) { // 防 iframe 多次注入，只在顶层运�
       return h;
     },
     cid() {
-      const m = location.href.match(/index#\/(\d+)\//) || location.href.match(/[?&#]cid=(\d+)/);
-      return m ? m[1] : null;
+      const m = location.href.match(/index#\/(\d+)\//) || location.href.match(/[?&#]cid=(\d+)/)
+        // 旧版讨论详情 hash：#/discuss/<tid>/<cid>/discussDetail（第二段是课程号）
+        || location.hash.match(/^#\/discuss\/[^/]+\/(\d+)\//);
+      if (m) { this._cid = m[1]; return m[1]; }
+      // hash 切到 #/discuss 等无课程号的讨论视图时，回退最近一次已知课程号：
+      // 否则去重键会在真实课程号与 'default' 之间漂移，导致同一帖子被反复回复
+      return this._cid || null;
+    },
+    rememberCid(v) {
+      if (v) this._cid = String(v);
     },
     async getJSON(path, params) {
       const qs = new URLSearchParams(params || {}).toString();
@@ -1588,32 +1613,102 @@ if (window.self === window.top) { // 防 iframe 多次注入，只在顶层运�
     return false;
   }
 
-  // 已回帖持久化去重（按课程，最多留 80 条）
-  function discRepliedGet() {
-    const all = Store.get('discReplied', {}) || {};
-    return Array.isArray(all[UOOC_API.cid() || 'default']) ? all[UOOC_API.cid() || 'default'] : [];
+  // 学习页内嵌讨论：详情视图在服务端版本里没有返回按钮，
+  // 回列表靠「重新点击当前激活的讨论资源项」让学习视图重渲染（顺带复位被改乱的 hash）。
+  function reopenDiscussionResource() {
+    const act = document.querySelector('.basic.active[ng-click*="goSource"]');
+    if (act) { try { act.click(); return true; } catch (e) { /* 忽略 */ } }
+    return false;
   }
-  function discRepliedAdd(tid) {
+
+  // 回讨论列表统一入口：
+  //   1) 站点返回按钮（新版若有）→ 2) hash 路由切列表 / 重开讨论资源
+  //   → 3) 同一帖连续 3 次仍退不出去 → 刷新页面兜底。
+  // 刷新记录写 sessionStorage：若刚为同一帖刷过还卡着，就不再刷新而是跳过本资源，
+  // 保证任何病态页面下都不会陷入"刷新→卡住→再刷新"的循环。
+  let discBackStuck = { tid: '', n: 0 };
+  function returnToDiscussionList(tid, route) {
+    if (dismissDiscussionDetail()) { discBackStuck = { tid: '', n: 0 }; return; }
+    const same = discBackStuck.tid === tid;
+    const n = (same ? discBackStuck.n : 0) + 1;
+    discBackStuck = { tid, n };
+    if (n >= 3) {
+      discBackStuck = { tid: '', n: 0 };
+      let recentlyReloaded = false;
+      try {
+        const last = JSON.parse(sessionStorage.getItem('uoocDiscReload') || 'null');
+        recentlyReloaded = !!(last && last.tid === tid && Date.now() - last.at < 90000);
+      } catch (e) { /* 忽略 */ }
+      if (recentlyReloaded) {
+        discState.done = true; // 彻底认输：跳过本资源，引擎继续下一节
+        log('⚠️ 讨论详情仍无法返回，跳过本资源继续');
+        return;
+      }
+      try { sessionStorage.setItem('uoocDiscReload', JSON.stringify({ tid, at: Date.now() })); } catch (e) { /* 忽略 */ }
+      log('🔄 讨论详情无法自动返回，刷新页面继续（已完成记录已保存）');
+      setTimeout(() => location.reload(), 400);
+      return;
+    }
+    if (route.domInline) reopenDiscussionResource();
+    else navDiscussionList(route.mode);
+  }
+
+  // 已回帖持久化去重（按课程，最多留 80 条）
+  // ⚠️ key 必须是稳定的课程号：调用方传入当轮已知最准的 cid（route.cid / scope.course_id 兜底）。
+  // v3.1.4 曾因 hash 切到 #/discuss 后 cid 解析失效，读写键在课程号与 'default' 间漂移，去重失效。
+  function discRepliedKey(cid) {
+    return String(cid || UOOC_API.cid() || 'default');
+  }
+  function discRepliedGet(cid) {
     const all = Store.get('discReplied', {}) || {};
-    const cid = UOOC_API.cid() || 'default';
-    const arr = Array.isArray(all[cid]) ? all[cid] : [];
+    const key = discRepliedKey(cid);
+    return Array.isArray(all[key]) ? all[key] : [];
+  }
+  function discRepliedAdd(cid, tid) {
+    const all = Store.get('discReplied', {}) || {};
+    const key = discRepliedKey(cid);
+    const arr = Array.isArray(all[key]) ? all[key] : [];
     if (!arr.includes(tid)) arr.push(tid);
     if (arr.length > 80) arr.splice(0, arr.length - 80);
-    all[cid] = arr;
+    all[key] = arr;
     Store.set({ discReplied: all });
   }
 
-  async function genDiscussionReply(title, content) {
+  // 成功发帖后的全局发帖冷却：站点有发帖频率限制（具体阈值未知），
+  // 冷却期内遇到讨论资源不再发帖，按普通无视频资源跨越（与「讨论区发帖」开关关闭同一路径）。
+  // 时间戳存 storage（discCooldownUntil），页面刷新 / 引擎重启后依然生效。
+  const DISC_POST_COOLDOWN_MS = 5 * 60 * 1000; // 5 分钟
+  let discCooldownNotedHash = ''; // 冷却提示去重：每个讨论资源只提示一次
+  function discCooldownLeftMs() {
+    return (Number(Store.get('discCooldownUntil', 0)) || 0) - Date.now();
+  }
+  function setDiscPostCooldown() {
+    Store.set({ discCooldownUntil: Date.now() + DISC_POST_COOLDOWN_MS });
+  }
+  function newDiscState() {
+    return {
+      busy: false, done: false, skip: false, failCount: 0, coolUntil: 0,
+      firstSeenAt: Date.now(), contentWait: null, entered: false
+    };
+  }
+
+  async function genDiscussionReply(title, content, replies) {
     const sys = [
       '你是一名认真参与在线课程讨论的学生。',
       '根据帖子题目和正文，写一条有价值、具体、自然的中文回复。',
       '回应原帖核心问题，补充方法、例子或容易忽略的角度，避免空泛赞同、重复原文和机械套话。',
+      '如果提供了「已有回复」，只用来了解讨论进度、避免观点重复，不要照抄、不要逐条回应、不要提及他人。',
       '只输出纯文本正文，不要 Markdown、HTML、引号或任何前缀，也不要提及 AI。',
       '80 到 200 字，语气自然，像真实学生参与讨论。'
     ].join('\n');
+    let user = '帖子题目：\n' + title + '\n\n帖子正文：\n' + content;
+    if (Array.isArray(replies) && replies.length) {
+      user += '\n\n已有回复（仅作参考，避免重复）：\n'
+        + replies.map((r, i) => `(${i + 1}) ${r}`).join('\n');
+    }
     const res = await llmChat([
       { role: 'system', content: sys },
-      { role: 'user', content: '帖子题目：\n' + title + '\n\n帖子正文：\n' + content }
+      { role: 'user', content: user }
     ], 0.7);
     if (!res || !res.ok) {
       log('🤖 LLM 调用失败：' + ((res && (res.error || 'HTTP ' + res.status)) || '未知错误'));
@@ -1625,15 +1720,34 @@ if (window.self === window.top) { // 防 iframe 多次注入，只在顶层运�
     return text.slice(0, 500) || null;
   }
 
+  // 本轮讨论会话的尝试记录：tid -> 已尝试次数（模块级，不被 hashchange 重置）。
+  // ⚠️ discState.tried 会在「返回列表」触发的 hashchange 时被清空——
+  // 若失败的帖子仅记在那里，回列表后会再次被选中重试，形成"失败↔重选"死循环（用户实测）。
+  // 每帖最多尝试 2 次，之后本轮会话内永久跳过；讨论全部完成时清空。
+  const discVisitTried = new Map();
+  const DISC_MAX_ATTEMPTS = 2;
+
   let discState = null;
   let lastLearnHash = '';
 
   async function discussionTick(route) {
-    if (!discState) {
-      discState = {
-        busy: false, done: false, skip: false, tried: new Set(),
-        failCount: 0, coolUntil: 0, firstSeenAt: Date.now()
-      };
+    // ⏳ 发帖冷却（成功发帖后 5 分钟）：站点有发帖频率限制。
+    // 冷却期内不进入发帖流程：置 skip 让主循环按普通无视频资源跨越（约 6 秒后自动跳下一节）。
+    if (discCooldownLeftMs() > 0) {
+      if (discCooldownNotedHash !== location.hash) {
+        discCooldownNotedHash = location.hash;
+        log(`⏳ 发帖冷却中（约剩 ${Math.ceil(discCooldownLeftMs() / 60000)} 分钟），本讨论按无视频资源跳过`);
+      }
+      if (!discState) discState = newDiscState();
+      discState.skip = true;
+      return;
+    }
+    discCooldownNotedHash = '';
+
+    if (!discState) discState = newDiscState();
+    if (!discState.entered) {
+      discState.entered = true;
+      discState.firstSeenAt = Date.now(); // 渲染超时从真正开始处理起算（冷却期创建的占位状态不算）
       log('💬 进入讨论区：AI 将为未回复的帖子自动生成并发帖');
     }
     if (discState.busy || discState.done || discState.skip) return;
@@ -1651,37 +1765,96 @@ if (window.self === window.top) { // 防 iframe 多次注入，只在顶层运�
     try {
       const probe = await pageEval('probe');
       if (!probe || probe.__err) throw new Error((probe && probe.__err) || '页面探针失败');
-      const replied = discRepliedGet();
 
       // 详情视图：回帖
       if (probe.detail && probe.detail.tid) {
-        const { tid, title, content } = probe.detail;
-        if (!title && !content) throw new Error('帖子内容尚未加载');
-        if (replied.includes(tid) || discState.tried.has(tid)) {
-          // 已回过：学习页内嵌靠返回按钮，course 页靠 hash 导航
-          if (!dismissDiscussionDetail()) navDiscussionList(route.mode);
+        const { tid, title, content, courseId } = probe.detail;
+        // cid 三级兜底：hash 路由 → 页面 scope 的 course_id → 最近已知课程号。
+        // 不再依赖"当前 hash 恰好含课程号"，避免去重键漂移。
+        const cid = route.cid || courseId || UOOC_API.cid() || '';
+        UOOC_API.rememberCid(cid);
+        const replied = discRepliedGet(cid);
+        // 学习页内嵌讨论有两种形态：资源本身就是单个帖子（无列表），
+        // 或列表点进来的详情（列表可能残留在 DOM）。前者处理完要直接放行引擎走下一节。
+        const hasList = !!(probe.list && probe.list.length);
+        const listBacked = hasList || !route.domInline;
+
+        const priorTries = discVisitTried.get(tid) || 0;
+        const alreadyDone = replied.includes(tid);
+        const attemptsExhausted = priorTries >= DISC_MAX_ATTEMPTS;
+        if (alreadyDone || attemptsExhausted) {
+          if (listBacked) {
+            log(alreadyDone
+              ? `💬 帖子 ${tid} 已处理过，返回列表`
+              : `💬 帖子 ${tid} 本轮已尝试 ${priorTries} 次仍未成功，跳过`);
+            returnToDiscussionList(tid, route);
+          } else {
+            discState.done = true; // 单帖资源：无列表可退，结束讨论流程，引擎继续
+            discVisitTried.clear();
+            log(alreadyDone ? '💬 当前讨论帖此前已回复，跳过本资源' : '💬 当前讨论帖本轮处理未成功，跳过本资源');
+          }
           return;
         }
+
+        // 正文优先：详情刚打开时 scope/DOM 里的正文可能还没渲染，标题已在。
+        // 此时直接生成回复会导致 AI 只拿到大标题、答非所问（用户实测）。
+        // 先等正文（每帖最多 20 秒），仍没有（图片帖等）才仅凭标题继续。
+        if (!title && !content) { // 标题正文都没到：等渲染，超时才判失败
+          const w = discState.contentWait;
+          if (!w || w.tid !== tid) {
+            discState.contentWait = { tid, since: Date.now() };
+            log('💬 等待帖子内容加载…');
+            return; // 不算失败，下一轮再看
+          }
+          if (Date.now() - w.since > 20000) throw new Error('帖子内容尚未加载');
+          return;
+        }
+        if (!content) {
+          const w = discState.contentWait;
+          if (!w || w.tid !== tid) {
+            discState.contentWait = { tid, since: Date.now() };
+            log('💬 等待帖子正文加载…');
+            return; // 不算失败，下一轮再看
+          }
+          if (Date.now() - w.since < 20000) return;
+          log('⚠️ 帖子正文 20 秒未加载，仅按标题生成回复');
+        }
+        discState.contentWait = null;
+        discVisitTried.set(tid, priorTries + 1); // 提交前记次：失败也不从本轮会话移除
         log(`💬 正在回复帖子：${(title || tid).slice(0, 24)}`);
-        const reply = await genDiscussionReply(title, content);
+        const reply = await genDiscussionReply(title, content, probe.detail.replies);
         if (!reply) throw new Error('LLM 未返回回复内容');
-        const res = await pageEval('submit', [route.cid || '', tid, reply]);
+        const res = await pageEval('submit', [cid, tid, reply]);
         if (!res || res.__err) throw new Error((res && res.__err) || '发帖失败');
-        discRepliedAdd(tid);
-        discState.tried.add(tid);
-        log(`✅ 讨论回复已发布（${tid}），返回列表继续`);
+        discRepliedAdd(cid, tid);
+        setDiscPostCooldown(); // 5 分钟发帖冷却：防站点发帖频率限制
+        discCooldownNotedHash = location.hash; // 本资源刚提示过发布成功，冷却提示从下一个讨论资源起
         discState.coolUntil = Date.now() + 8000 + Math.floor(Math.random() * 12000);
         await wait(1200);
-        if (!dismissDiscussionDetail()) navDiscussionList(route.mode);
+        if (listBacked) {
+          log(`✅ 讨论回复已发布（${tid}），返回列表（进入 5 分钟发帖冷却）`);
+          returnToDiscussionList(tid, route);
+        } else {
+          discState.done = true; // 单帖资源：回复完成，结束讨论流程，引擎继续
+          discVisitTried.clear();
+          log(`✅ 讨论回复已发布（${tid}），进入 5 分钟发帖冷却`);
+        }
         return;
       }
 
       // 列表视图：找下一个未回帖并进入
       if (probe.list && probe.list.length) {
+        const cid = route.cid || (probe.detail && probe.detail.courseId) || UOOC_API.cid() || '';
+        UOOC_API.rememberCid(cid);
+        const replied = discRepliedGet(cid);
         const next = probe.list.find((it) =>
-          it.tid && !replied.includes(it.tid) && !discState.tried.has(it.tid));
+          it.tid && !replied.includes(it.tid)
+          && (discVisitTried.get(it.tid) || 0) < DISC_MAX_ATTEMPTS);
         if (!next) {
+          // done 后主循环落到普通资源跨越，navigate 到下一节；
+          // hashchange 会把 discState 置空，下一资源从零识别。
           discState.done = true;
+          discVisitTried.clear(); // 本轮会话结束：下次进入讨论资源从零开始
           log('💬 讨论区当前列表的帖子已全部回复完成');
           speak('讨论完成');
           if (lastLearnHash && route.domInline) location.hash = lastLearnHash; // 内嵌场景回学习视图
@@ -1815,6 +1988,7 @@ if (window.self === window.top) { // 防 iframe 多次注入，只在顶层运�
     stop: _svg('<rect x="5.5" y="5.5" width="13" height="13" rx="2.5"/>', true),
     check: _svg('<polyline points="20 6 9 17 4 12"/>'),
     x: _svg('<line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/>'),
+    chevron: _svg('<polyline points="6 9 12 15 18 9"/>'),
   };
 
   // ---- 面板收起/展开 + 挂机后自动退场 ----
@@ -1823,6 +1997,8 @@ if (window.self === window.top) { // 防 iframe 多次注入，只在顶层运�
   let autoCollapseTimer = null;
   let userReExpanded = false;
   let dragInProgress = false;
+  let dockedMode = false; // 学习页停靠模式：控制台入口挂在站点标题栏，面板改为下拉
+  let dockEl = null;      // 标题栏里的停靠条 DOM
 
   function panelIsVisible() {
     const p = document.getElementById('uooc-video-panel');
@@ -1840,10 +2016,71 @@ if (window.self === window.top) { // 防 iframe 多次注入，只在顶层运�
     el.style.left = left + 'px';
   }
 
+  // ---- 学习页顶部停靠：控制台入口放进站点标题栏（.learn-head 中间空位） ----
+  // 命中标题栏 → 面板不再悬浮挡内容，改为挂在下拉；未命中（考试页等）→ 保持原来的悬浮 + 胶囊。
+  function dockHostEl() {
+    return document.querySelector('.learn-head-title > div') || document.querySelector('.learn-head');
+  }
+
+  function mountDock() {
+    if (dockEl) return true;
+    const host = dockHostEl();
+    if (!host) return false;
+    const dock = document.createElement('div');
+    dock.id = 'uooc-dock';
+    dock.innerHTML = `
+        <span id="uooc-dock-dot"></span>
+        <span id="uooc-dock-state">未启动</span>
+        <span id="uooc-dock-ticker" title="点击打开控制台">就绪</span>
+        <button id="uooc-dock-start" class="uooc-dock-btn" type="button">${ICONS.play}<span>启动挂机</span></button>
+        <button id="uooc-dock-toggle" class="uooc-dock-btn" type="button" title="展开 / 收起控制台"><span>控制台</span>${ICONS.chevron}</button>
+      `;
+    host.appendChild(dock);
+    const head = host.closest('.learn-head');
+    if (head) head.classList.add('uooc-has-dock'); // 收窄标题，避免压到停靠条
+    dockEl = dock;
+    dock.querySelector('#uooc-dock-start').addEventListener('click',
+      () => (engineStarted ? stopEngine() : startEngine(false)));
+    dock.querySelector('#uooc-dock-toggle').addEventListener('click',
+      () => { if (panelIsVisible()) minimizePanel(); else expandPanel(true); });
+    dock.querySelector('#uooc-dock-ticker').addEventListener('click', () => expandPanel(true));
+    // 面板构建期缓冲的日志已进 DOM：用最后一条初始化跑马灯，避免停靠条停在"就绪"
+    const lastLogLine = document.querySelector('#uooc-log > div:last-child');
+    if (lastLogLine) dock.querySelector('#uooc-dock-ticker').textContent = lastLogLine.textContent;
+    updateEngineBtn();
+    updateDockToggle();
+    return true;
+  }
+
+  function tryDock() {
+    if (dockedMode || !mountDock()) return;
+    dockedMode = true;
+    const p = document.getElementById('uooc-video-panel');
+    const b = document.getElementById('uooc-min-ball');
+    if (b) b.style.display = 'none';            // 停靠模式不用胶囊
+    if (p) { p.classList.add('docked'); p.style.display = 'none'; } // 默认收起，只留标题栏入口
+    updateDockToggle();
+  }
+
+  function updateDockToggle() {
+    const t = document.getElementById('uooc-dock-toggle');
+    if (!t) return;
+    const open = panelIsVisible();
+    t.classList.toggle('open', open);
+    const s = t.querySelector('span');
+    if (s) s.textContent = open ? '收起' : '控制台';
+  }
+
   function minimizePanel() {
     const p = document.getElementById('uooc-video-panel');
     const b = document.getElementById('uooc-min-ball');
-    if (!p || !b) return;
+    if (!p) return;
+    if (dockedMode) { // 停靠模式：直接收起，入口常驻标题栏
+      p.style.display = 'none';
+      updateDockToggle();
+      return;
+    }
+    if (!b) return;
     // 胶囊继承面板当前位置，避免跳位
     const r = p.getBoundingClientRect();
     b.style.left = Math.max(8, r.left) + 'px';
@@ -1851,12 +2088,20 @@ if (window.self === window.top) { // 防 iframe 多次注入，只在顶层运�
     snapToEdge(b);
     p.style.display = 'none';
     b.style.display = 'flex';
+    updateDockToggle();
   }
 
   function expandPanel(byUser) {
     const p = document.getElementById('uooc-video-panel');
     const b = document.getElementById('uooc-min-ball');
-    if (!p || !b) return;
+    if (!p) return;
+    if (dockedMode) { // 停靠模式：位置由 CSS .docked 锁定在标题栏下方
+      p.style.display = 'block';
+      if (byUser) userReExpanded = true; // 用户主动展开后，本生命周期不再自动收起
+      updateDockToggle();
+      return;
+    }
+    if (!b) return;
     const r = b.getBoundingClientRect();
     b.style.display = 'none';
     p.style.display = 'block'; // 先显示再测量，offsetWidth 才有值
@@ -1864,6 +2109,7 @@ if (window.self === window.top) { // 防 iframe 多次注入，只在顶层运�
     p.style.left = Math.max(8, Math.min(r.left, maxLeft)) + 'px';
     p.style.top = Math.max(8, Math.min(r.top, window.innerHeight - 120)) + 'px';
     if (byUser) userReExpanded = true; // 用户主动展开后，本生命周期不再自动收起
+    updateDockToggle();
   }
 
   function scheduleAutoCollapse() {
@@ -1873,7 +2119,9 @@ if (window.self === window.top) { // 防 iframe 多次注入，只在顶层运�
       autoCollapseTimer = null;
       if (engineStarted && !userReExpanded && !dragInProgress && panelIsVisible()) {
         minimizePanel();
-        log('🎛️ 面板已自动收起，点击左侧胶囊可随时展开');
+        log(dockedMode
+          ? '🎛️ 控制台已收起，点击标题栏「控制台」可随时展开'
+          : '🎛️ 面板已自动收起，点击左侧胶囊可随时展开');
       }
     }, 1500);
   }
@@ -1882,90 +2130,119 @@ if (window.self === window.top) { // 防 iframe 多次注入，只在顶层运�
     if (document.getElementById('uooc-video-panel')) return;
 
     const css = `
-        #uooc-video-panel { position:fixed; top:20px; left:20px; width:264px; background:rgba(11,17,27,.94); backdrop-filter:blur(12px) saturate(130%); color:#f8fafc; z-index:2147483647; pointer-events:auto; border:1px solid rgba(148,163,184,.14); border-radius:12px; box-shadow:0 18px 45px rgba(0,0,0,.28), 0 2px 8px rgba(0,0,0,.22); font-family:Inter,ui-sans-serif,system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI","Microsoft YaHei",sans-serif; display:block; }
+        #uooc-video-panel { position:fixed; top:20px; left:20px; width:264px; background:#ffffff; color:#1f2937; z-index:2147483647; pointer-events:auto; border:1px solid #e5e7eb; border-radius:12px; box-shadow:0 16px 40px rgba(15,23,42,.16), 0 2px 8px rgba(15,23,42,.08); font-family:Inter,ui-sans-serif,system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI","Microsoft YaHei",sans-serif; display:block; }
+        #uooc-video-panel.docked { top:96px; right:158px; left:auto; max-height:calc(100vh - 108px); overflow-y:auto; }
+        /* 停靠下拉形态整体压紧：行高与日志缩短，保证常见窗口高度下不出滚动条 */
+        #uooc-video-panel.docked #uooc-panel-body { padding:6px 12px 8px; }
+        #uooc-video-panel.docked .uooc-setting { min-height:33px; }
+        #uooc-video-panel.docked .uooc-sec-head { margin:1px 0 6px; }
+        #uooc-video-panel.docked #uooc-helper-rows, #uooc-video-panel.docked #uooc-ai-sec, #uooc-video-panel.docked .uooc-log-sec { margin-top:6px; padding-top:5px; }
+        #uooc-video-panel.docked #uooc-log { height:46px; }
         #uooc-video-panel * { box-sizing:border-box; }
-        #uooc-drag-bar { display:flex; align-items:center; gap:9px; padding:9px 12px; cursor:move; user-select:none; border-bottom:1px solid rgba(148,163,184,.14); }
-        #uooc-header-dot { flex:none; width:9px; height:9px; border-radius:50%; background:#64748b; transition:background .2s ease; }
-        #uooc-header-dot.on { background:#22c55e; box-shadow:0 0 0 4px rgba(34,197,94,.10); animation:uooc-pulse 2.4s ease-in-out infinite; }
-        @keyframes uooc-pulse { 0%,100% { box-shadow:0 0 0 3px rgba(34,197,94,.08); } 50% { box-shadow:0 0 0 6px rgba(34,197,94,.16); } }
+        #uooc-drag-bar { display:flex; align-items:center; gap:9px; padding:9px 12px; cursor:move; user-select:none; border-bottom:1px solid #eef1f5; }
+        #uooc-video-panel.docked #uooc-drag-bar { cursor:default; }
+        #uooc-header-dot { flex:none; width:9px; height:9px; border-radius:50%; background:#cbd5e1; transition:background .2s ease; }
+        #uooc-header-dot.on { background:#22c55e; box-shadow:0 0 0 4px rgba(34,197,94,.14); animation:uooc-pulse 2.4s ease-in-out infinite; }
+        @keyframes uooc-pulse { 0%,100% { box-shadow:0 0 0 3px rgba(34,197,94,.12); } 50% { box-shadow:0 0 0 6px rgba(34,197,94,.24); } }
         @media (prefers-reduced-motion: reduce) { #uooc-header-dot.on { animation:none; } }
         .uooc-header-text { flex:1; min-width:0; }
-        .uooc-header-title { font-size:13px; font-weight:600; line-height:1.25; color:#f8fafc; }
-        .uooc-header-sub { font-size:10px; color:#7f8da3; line-height:1.3; }
+        .uooc-header-title { font-size:13px; font-weight:600; line-height:1.25; color:#111827; }
+        .uooc-header-sub { font-size:10px; color:#94a3b8; line-height:1.3; }
         .uooc-bar-icons { display:flex; align-items:center; gap:2px; }
-        .uooc-bar-icons span { display:flex; align-items:center; justify-content:center; width:24px; height:24px; border-radius:6px; cursor:pointer; color:#7f8da3; transition:background 140ms ease, color 140ms ease; }
-        .uooc-bar-icons span:hover { background:rgba(148,163,184,.12); color:#e2e8f0; }
+        .uooc-bar-icons span { display:flex; align-items:center; justify-content:center; width:24px; height:24px; border-radius:6px; cursor:pointer; color:#64748b; transition:background 140ms ease, color 140ms ease; }
+        .uooc-bar-icons span:hover { background:#f1f5f9; color:#0f172a; }
         .uooc-bar-icons svg, .uooc-sec-gear svg { width:15px; height:15px; }
         #uooc-panel-body { padding:8px 12px 10px; }
         .uooc-sec-head { display:flex; align-items:center; justify-content:space-between; margin:2px 0 8px; }
-        .uooc-sec-title { font-size:11px; font-weight:600; color:#7f8da3; letter-spacing:.4px; }
-        .uooc-sec-status { font-size:10px; color:#64748b; transition:color .2s ease; }
-        .uooc-sec-status.on { color:#22c55e; }
-        .uooc-sec-gear { display:flex; align-items:center; justify-content:center; width:22px; height:22px; border-radius:6px; cursor:pointer; color:#7f8da3; transition:background 140ms ease, color 140ms ease; }
-        .uooc-sec-gear:hover { background:rgba(148,163,184,.12); color:#e2e8f0; }
-        #uooc-helper-rows, #uooc-ai-sec, .uooc-log-sec { margin-top:8px; padding-top:6px; border-top:1px solid rgba(148,163,184,.10); }
-        #uooc-start-btn { display:flex; align-items:center; justify-content:center; gap:7px; width:100%; height:34px; background:#3b82f6; color:#fff; border:none; border-radius:7px; font-size:12px; font-weight:600; cursor:pointer; font-family:inherit; transition:background 140ms ease, border-color 140ms ease, transform 80ms ease; }
-        #uooc-start-btn:hover { background:#4b8df8; }
+        .uooc-sec-title { font-size:11px; font-weight:600; color:#64748b; letter-spacing:.4px; }
+        .uooc-sec-status { font-size:10px; color:#94a3b8; transition:color .2s ease; }
+        .uooc-sec-status.on { color:#16a34a; }
+        .uooc-sec-gear { display:flex; align-items:center; justify-content:center; width:22px; height:22px; border-radius:6px; cursor:pointer; color:#64748b; transition:background 140ms ease, color 140ms ease; }
+        .uooc-sec-gear:hover { background:#f1f5f9; color:#0f172a; }
+        #uooc-helper-rows, #uooc-ai-sec, .uooc-log-sec { margin-top:8px; padding-top:6px; border-top:1px solid #eef1f5; }
+        #uooc-start-btn { display:flex; align-items:center; justify-content:center; gap:7px; width:100%; height:34px; background:#3b82f6; color:#fff; border:1px solid transparent; border-radius:7px; font-size:12px; font-weight:600; cursor:pointer; font-family:inherit; transition:background 140ms ease, border-color 140ms ease, transform 80ms ease; }
+        #uooc-start-btn:hover { background:#2f76e8; }
         #uooc-start-btn:active { transform:translateY(1px); }
-        #uooc-start-btn:focus-visible { outline:none; box-shadow:0 0 0 2px #0c111b, 0 0 0 4px rgba(59,130,246,.55); }
-        #uooc-start-btn.running { background:rgba(239,68,68,.08); border:1px solid rgba(239,68,68,.24); color:#f87171; }
-        #uooc-start-btn.running:hover { background:rgba(239,68,68,.14); }
+        #uooc-start-btn:focus-visible { outline:none; box-shadow:0 0 0 2px #fff, 0 0 0 4px rgba(59,130,246,.45); }
+        #uooc-start-btn.running { background:#fef2f2; border-color:#fecaca; color:#dc2626; }
+        #uooc-start-btn.running:hover { background:#fee2e2; }
         #uooc-start-btn svg { width:12px; height:12px; }
         .uooc-engine-sub { display:flex; gap:7px; margin-top:7px; }
-        #uooc-refresh-btn, #uooc-unlock-btn { flex:1; display:flex; align-items:center; justify-content:center; gap:6px; height:28px; background:transparent; color:#cbd5e1; border:1px solid rgba(148,163,184,.18); border-radius:7px; font-size:11px; font-weight:500; cursor:pointer; font-family:inherit; transition:background 140ms ease, border-color 140ms ease, transform 80ms ease; }
-        #uooc-refresh-btn:hover, #uooc-unlock-btn:hover { background:rgba(148,163,184,.08); border-color:rgba(148,163,184,.28); }
+        #uooc-refresh-btn, #uooc-unlock-btn { flex:1; display:flex; align-items:center; justify-content:center; gap:6px; height:28px; background:#fff; color:#374151; border:1px solid #e2e8f0; border-radius:7px; font-size:11px; font-weight:500; cursor:pointer; font-family:inherit; transition:background 140ms ease, border-color 140ms ease, transform 80ms ease; }
+        #uooc-refresh-btn:hover, #uooc-unlock-btn:hover { background:#f8fafc; border-color:#cbd5e1; }
         #uooc-refresh-btn:active, #uooc-unlock-btn:active { transform:translateY(1px); }
-        #uooc-refresh-btn:focus-visible, #uooc-unlock-btn:focus-visible { outline:none; box-shadow:0 0 0 2px #0c111b, 0 0 0 4px rgba(59,130,246,.55); }
+        #uooc-refresh-btn:focus-visible, #uooc-unlock-btn:focus-visible { outline:none; box-shadow:0 0 0 2px #fff, 0 0 0 4px rgba(59,130,246,.45); }
         #uooc-refresh-btn svg, #uooc-unlock-btn svg { width:12px; height:12px; }
         .uooc-setting { display:flex; align-items:center; gap:8px; min-height:38px; padding:5px 6px; margin:0 -6px; border-radius:8px; cursor:pointer; user-select:none; transition:background 140ms ease; }
-        .uooc-setting:hover { background:rgba(148,163,184,.07); }
+        .uooc-setting:hover { background:#f8fafc; }
         .uooc-setting-text { flex:1; min-width:0; display:flex; flex-direction:column; gap:1px; }
-        .uooc-setting-title { font-size:12px; color:#f8fafc; line-height:1.35; }
-        .uooc-setting-desc { font-size:9.5px; color:#7f8da3; line-height:1.3; }
+        .uooc-setting-title { font-size:12px; color:#1f2937; line-height:1.35; }
+        .uooc-setting-desc { font-size:9.5px; color:#94a3b8; line-height:1.3; }
         .uooc-setting input[type=checkbox] { position:absolute; opacity:0; width:0; height:0; }
-        .uooc-switch { flex:none; width:30px; height:18px; border-radius:9px; background:#334155; position:relative; transition:background 160ms ease; }
-        .uooc-switch::after { content:''; position:absolute; top:2px; left:2px; width:14px; height:14px; border-radius:50%; background:#f8fafc; box-shadow:0 1px 2px rgba(0,0,0,.35); transition:transform 160ms ease; }
+        .uooc-switch { flex:none; width:30px; height:18px; border-radius:9px; background:#cbd5e1; position:relative; transition:background 160ms ease; }
+        .uooc-switch::after { content:''; position:absolute; top:2px; left:2px; width:14px; height:14px; border-radius:50%; background:#fff; box-shadow:0 1px 2px rgba(15,23,42,.25); transition:transform 160ms ease; }
         .uooc-setting input:checked + .uooc-switch { background:#3b82f6; }
         .uooc-setting input:checked + .uooc-switch::after { transform:translateX(12px); }
-        .uooc-setting input:focus-visible + .uooc-switch { box-shadow:0 0 0 2px #0c111b, 0 0 0 4px rgba(59,130,246,.55); }
-        .uooc-select { flex:none; width:64px; height:24px; padding:0 4px; background:#151e2d; color:#cbd5e1; border:1px solid rgba(148,163,184,.18); border-radius:6px; font-size:11px; font-family:inherit; cursor:pointer; }
-        .uooc-select:hover { border-color:rgba(148,163,184,.28); }
+        .uooc-setting input:focus-visible + .uooc-switch { box-shadow:0 0 0 2px #fff, 0 0 0 4px rgba(59,130,246,.45); }
+        .uooc-select { flex:none; width:64px; height:24px; padding:0 4px; background:#fff; color:#374151; border:1px solid #e2e8f0; border-radius:6px; font-size:11px; font-family:inherit; cursor:pointer; }
+        .uooc-select:hover { border-color:#cbd5e1; }
         .uooc-select:focus-visible { outline:none; border-color:#3b82f6; box-shadow:0 0 0 3px rgba(59,130,246,.13); }
         #uooc-answer-btn, #uooc-copy-btn { display:flex; align-items:center; justify-content:center; gap:7px; width:100%; height:32px; border-radius:7px; font-size:12px; font-weight:500; cursor:pointer; font-family:inherit; transition:background 140ms ease, border-color 140ms ease, transform 80ms ease; }
-        #uooc-answer-btn { background:#3b82f6; color:#fff; border:none; margin-top:8px; }
-        #uooc-answer-btn:hover { background:#4b8df8; }
+        #uooc-answer-btn { background:#3b82f6; color:#fff; border:1px solid transparent; margin-top:8px; }
+        #uooc-answer-btn:hover { background:#2f76e8; }
         #uooc-answer-btn:active { transform:translateY(1px); }
-        #uooc-answer-btn:focus-visible { outline:none; box-shadow:0 0 0 2px #0c111b, 0 0 0 4px rgba(59,130,246,.55); }
+        #uooc-answer-btn:focus-visible { outline:none; box-shadow:0 0 0 2px #fff, 0 0 0 4px rgba(59,130,246,.45); }
         #uooc-answer-btn:disabled { cursor:default; }
         #uooc-answer-btn.ans-loading { opacity:.85; }
-        #uooc-answer-btn.ans-ok { background:rgba(34,197,94,.12); color:#4ade80; }
-        #uooc-answer-btn.ans-ok:hover { background:rgba(34,197,94,.18); }
-        #uooc-answer-btn.ans-err { background:rgba(239,68,68,.12); color:#f87171; }
-        #uooc-answer-btn.ans-err:hover { background:rgba(239,68,68,.18); }
+        #uooc-answer-btn.ans-ok { background:#f0fdf4; border-color:#bbf7d0; color:#16a34a; }
+        #uooc-answer-btn.ans-ok:hover { background:#dcfce7; }
+        #uooc-answer-btn.ans-err { background:#fef2f2; border-color:#fecaca; color:#dc2626; }
+        #uooc-answer-btn.ans-err:hover { background:#fee2e2; }
         #uooc-answer-btn svg, #uooc-copy-btn svg { width:13px; height:13px; }
-        .uooc-spinner { width:12px; height:12px; border:2px solid rgba(255,255,255,.25); border-top-color:#fff; border-radius:50%; animation:uooc-spin .8s linear infinite; }
+        .uooc-spinner { width:12px; height:12px; border:2px solid rgba(255,255,255,.35); border-top-color:#fff; border-radius:50%; animation:uooc-spin .8s linear infinite; }
         @keyframes uooc-spin { to { transform:rotate(360deg); } }
-        #uooc-copy-btn { background:transparent; color:#cbd5e1; border:1px solid rgba(148,163,184,.18); margin-top:7px; }
-        #uooc-copy-btn:hover { background:rgba(148,163,184,.08); border-color:rgba(148,163,184,.28); }
+        #uooc-copy-btn { background:#fff; color:#374151; border:1px solid #e2e8f0; margin-top:7px; }
+        #uooc-copy-btn:hover { background:#f8fafc; border-color:#cbd5e1; }
         #uooc-copy-btn:active { transform:translateY(1px); }
-        #uooc-copy-btn:focus-visible { outline:none; box-shadow:0 0 0 2px #0c111b, 0 0 0 4px rgba(59,130,246,.55); }
-        .uooc-log-head-clear { font-size:10px; color:#7f8da3; cursor:pointer; padding:2px 6px; border-radius:5px; user-select:none; transition:background 140ms ease, color 140ms ease; }
-        .uooc-log-head-clear:hover { background:rgba(148,163,184,.10); color:#cbd5e1; }
-        #uooc-log { height:68px; overflow-y:auto; background:#0a101a; border:1px solid rgba(148,163,184,.14); border-radius:8px; padding:7px 8px; font-family:ui-monospace,"Cascadia Code",Consolas,monospace; font-size:10px; line-height:1.55; color:#9eacc0; }
+        #uooc-copy-btn:focus-visible { outline:none; box-shadow:0 0 0 2px #fff, 0 0 0 4px rgba(59,130,246,.45); }
+        .uooc-log-head-clear { font-size:10px; color:#64748b; cursor:pointer; padding:2px 6px; border-radius:5px; user-select:none; transition:background 140ms ease, color 140ms ease; }
+        .uooc-log-head-clear:hover { background:#f1f5f9; color:#1f2937; }
+        #uooc-log { height:68px; overflow-y:auto; background:#f8fafc; border:1px solid #e9eef5; border-radius:8px; padding:7px 8px; font-family:ui-monospace,"Cascadia Code",Consolas,monospace; font-size:10px; line-height:1.55; color:#475569; }
         #uooc-log div { word-break:break-all; }
-        #uooc-log .log-success { color:#86efac; }
-        #uooc-log .log-warning { color:#fcd34d; }
-        #uooc-log .log-danger { color:#fca5a5; }
-        #uooc-log .log-info { color:#93c5fd; }
+        #uooc-log .log-success { color:#15803d; }
+        #uooc-log .log-warning { color:#b45309; }
+        #uooc-log .log-danger { color:#dc2626; }
+        #uooc-log .log-info { color:#1d4ed8; }
         #uooc-log::-webkit-scrollbar { width:4px; }
         #uooc-log::-webkit-scrollbar-track { background:transparent; }
-        #uooc-log::-webkit-scrollbar-thumb { background:rgba(148,163,184,.25); border-radius:2px; }
-        #uooc-min-ball { position:fixed; top:20px; left:20px; width:40px; height:40px; background:rgba(15,23,42,.96); border:1px solid rgba(148,163,184,.18); border-radius:12px; z-index:2147483647; pointer-events:auto; display:none; align-items:center; justify-content:center; cursor:move; user-select:none; box-shadow:0 10px 30px rgba(0,0,0,.30); touch-action:none; }
-        .uooc-ball-u { font-size:15px; font-weight:700; color:#cbd5e1; }
-        .uooc-ball-dot { display:none; position:absolute; top:-2px; right:-2px; width:10px; height:10px; border-radius:50%; background:#22c55e; border:2px solid #0b0f17; }
+        #uooc-log::-webkit-scrollbar-thumb { background:rgba(100,116,139,.35); border-radius:2px; }
+        #uooc-min-ball { position:fixed; top:20px; left:20px; width:40px; height:40px; background:#ffffff; border:1px solid #e5e7eb; border-radius:12px; z-index:2147483647; pointer-events:auto; display:none; align-items:center; justify-content:center; cursor:move; user-select:none; box-shadow:0 10px 28px rgba(15,23,42,.18); touch-action:none; }
+        .uooc-ball-u { font-size:15px; font-weight:700; color:#334155; }
+        .uooc-ball-dot { display:none; position:absolute; top:-2px; right:-2px; width:10px; height:10px; border-radius:50%; background:#22c55e; border:2px solid #fff; }
         #uooc-min-ball.running .uooc-ball-dot { display:block; animation:uooc-ballpulse 2.4s ease-in-out infinite; }
-        @keyframes uooc-ballpulse { 0%,100% { box-shadow:0 0 0 2px rgba(34,197,94,.12); } 50% { box-shadow:0 0 0 5px rgba(34,197,94,.30); } }
+        @keyframes uooc-ballpulse { 0%,100% { box-shadow:0 0 0 2px rgba(34,197,94,.14); } 50% { box-shadow:0 0 0 5px rgba(34,197,94,.30); } }
         @media (prefers-reduced-motion: reduce) { #uooc-min-ball.running .uooc-ball-dot { animation:none; } }
+        /* ---- 学习页顶部停靠条：挂在站点 .learn-head 黑色标题栏中间（原红框空位） ---- */
+        .learn-head.uooc-has-dock h3.oneline { max-width:max(160px, calc(100% - 740px)); }
+        #uooc-dock { position:absolute; top:19px; right:158px; height:52px; max-width:calc(100% - 380px); display:flex; align-items:center; justify-content:flex-end; gap:10px; z-index:11; font-family:Inter,ui-sans-serif,system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI","Microsoft YaHei",sans-serif; }
+        #uooc-dock * { box-sizing:border-box; }
+        #uooc-dock-dot { flex:none; width:8px; height:8px; border-radius:50%; background:#8a8f96; transition:background .2s ease; }
+        #uooc-dock-dot.on { background:#22c55e; box-shadow:0 0 0 3px rgba(34,197,94,.20); }
+        #uooc-dock-state { flex:none; font-size:12px; color:#b9bdc2; }
+        #uooc-dock-state.on { color:#4ade80; }
+        #uooc-dock-ticker { flex:0 1 auto; min-width:0; max-width:320px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; font-size:12px; color:#9aa0a6; cursor:pointer; transition:color 140ms ease; }
+        #uooc-dock-ticker:hover { color:#d5d8dc; }
+        .uooc-dock-btn { flex:none; display:inline-flex; align-items:center; gap:6px; height:32px; padding:0 12px; border-radius:8px; font-size:12px; font-weight:500; cursor:pointer; font-family:inherit; transition:background 140ms ease, border-color 140ms ease, color 140ms ease; }
+        .uooc-dock-btn svg { width:13px; height:13px; }
+        .uooc-dock-btn:focus-visible { outline:none; box-shadow:0 0 0 2px #292929, 0 0 0 4px rgba(59,130,246,.55); }
+        #uooc-dock-start { background:#3b82f6; border:1px solid transparent; color:#fff; font-weight:600; }
+        #uooc-dock-start:hover { background:#2f76e8; }
+        #uooc-dock-start.running { background:rgba(239,68,68,.14); border-color:rgba(248,113,113,.45); color:#fca5a5; }
+        #uooc-dock-start.running:hover { background:rgba(239,68,68,.24); }
+        #uooc-dock-toggle { background:rgba(255,255,255,.06); border:1px solid rgba(255,255,255,.18); color:#e3e6ea; }
+        #uooc-dock-toggle:hover { background:rgba(255,255,255,.12); border-color:rgba(255,255,255,.28); }
+        #uooc-dock-toggle svg { transition:transform 160ms ease; }
+        #uooc-dock-toggle.open svg { transform:rotate(180deg); }
     `;
     const style = document.createElement('style');
     style.innerHTML = css;
@@ -2195,6 +2472,7 @@ if (window.self === window.top) { // 防 iframe 多次注入，只在顶层运�
     // 整体覆盖），不单独依赖 click（会被站点全局 mouse/click 处理器干扰）。
     // v3.1.1/v3.1.2 胶囊打不开的根因即此——事件通道本身被页面吃掉。
     // 胶囊用 Pointer Capture：拖拽与点击判定都在胶囊自身事件上完成。
+    // 学习页停靠模式下：面板由 CSS .docked 定位在标题栏下方，拖拽整体禁用。
     let panelDrag = null; // {sx, sy, ix, iy}
     let ballDrag = null;  // {sx, sy, ix, iy, moved}
     let lastExpandAt = 0;
@@ -2214,6 +2492,7 @@ if (window.self === window.top) { // 防 iframe 多次注入，只在顶层运�
 
     // 面板拖拽（标题栏起手）；capture 阶段监听，先于页面处理器
     if (dragBar) dragBar.addEventListener('mousedown', (e) => {
+      if (dockedMode) return; // 停靠模式下不拖拽
       e.preventDefault();
       panelDrag = { sx: e.clientX, sy: e.clientY, ix: panel.offsetLeft, iy: panel.offsetTop };
       dragInProgress = true;
@@ -2278,6 +2557,22 @@ if (window.self === window.top) { // 防 iframe 多次注入，只在顶层运�
       document.getElementById('uooc-engine-row').style.display = 'none';
       document.getElementById('uooc-helper-rows').style.display = 'none';
       log('📄 测评页面模式：配置好 API 后点「开始 AI 答题」');
+    }
+
+    // ---- 学习页顶部停靠：入口进站点标题栏（.learn-head 中间空位），面板改下拉 ----
+    // 考试页不参与停靠（保留悬浮面板 + 胶囊的既有形态）。
+    // 站点是 Angular 渲染，标题栏可能晚于脚本就绪、也可能被重渲染抹掉，故常驻看门狗自愈。
+    if (!isExamPage()) {
+      tryDock();
+      setInterval(() => {
+        if (dockEl && !dockEl.isConnected) { // 标题栏被重渲染 → 复位后重挂
+          dockEl = null;
+          dockedMode = false;
+          const p = document.getElementById('uooc-video-panel');
+          if (p) p.classList.remove('docked');
+        }
+        if (!dockedMode) tryDock();
+      }, 1500);
     }
 
     syncPanelControls();
@@ -2389,7 +2684,7 @@ if (window.self === window.top) { // 防 iframe 多次注入，只在顶层运�
       if (engineStarted && (disc.active || discByName) && Store.get('discussionOn', true)) {
         discussionTick(disc);
         if (discState && discState.skip) {
-          discState.skip = false; // LLM 未配置：放行本轮，走下面的普通跨越
+          discState.skip = false; // LLM 未配置 / 发帖冷却中：放行本轮，走下面的普通跨越
         } else if (!(discState && discState.done)) {
           return; // 处理中 / 等待内容渲染：独占主循环
         }

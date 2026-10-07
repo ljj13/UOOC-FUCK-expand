@@ -1,19 +1,29 @@
 // 面板控件引用校验：bindToggle / on() / syncPanelControls 里引用的所有
-// uooc-* 面板 ID 必须存在于 buildPanel 的 HTML 模板中。
+// uooc-* 面板 ID 必须存在于 buildPanel / mountDock 的 HTML 模板中。
 // v3.1.1~3.1.2 胶囊打不开的根因就是 uooc-disc-on 引用了不存在的控件，
 // 抛异常中断 buildPanel 导致后续所有绑定消失——本脚本防止再犯。
+// v3.2.0 起停靠条（#uooc-dock-*）是第二套 HTML 模板，同样纳入校验。
 const fs = require('node:fs');
 const path = require('node:path');
 
 const file = path.join(__dirname, '..', 'content', 'content.js');
 const src = fs.readFileSync(file, 'utf8');
 
-// 1. 提取面板 HTML 模板（兼容 CRLF / LF 行尾）
-const htmlMatch = src.match(/div\.innerHTML = `([\s\S]*?)`;\s*document\.body\.appendChild/);
-if (!htmlMatch) { console.error('无法提取面板 HTML 模板'); process.exit(1); }
-const html = htmlMatch[1];
-const htmlIds = new Set(
-  Array.from(html.matchAll(/id="(uooc-[a-z0-9-]+)"/g)).map((m) => m[1]));
+// 1. 提取 HTML 模板集合（兼容 CRLF / LF 行尾）：
+//    a) 悬浮面板：div.innerHTML = `...`; document.body.appendChild
+//    b) 顶部停靠条：dock.innerHTML = `...`;
+const htmlBlocks = [];
+const panelMatch = src.match(/div\.innerHTML = `([\s\S]*?)`;\s*document\.body\.appendChild/);
+if (!panelMatch) { console.error('无法提取面板 HTML 模板'); process.exit(1); }
+htmlBlocks.push({ name: '悬浮面板', html: panelMatch[1] });
+const dockMatch = src.match(/dock\.innerHTML = `([\s\S]*?)`;/);
+if (dockMatch) htmlBlocks.push({ name: '顶部停靠条', html: dockMatch[1] });
+else console.warn('⚠️ 未找到停靠条 HTML 模板（改名了？如是请同步本工具）');
+
+const htmlIds = new Set();
+for (const b of htmlBlocks) {
+  for (const m of b.html.matchAll(/id="(uooc-[a-z0-9-]+)"/g)) htmlIds.add(m[1]);
+}
 
 // 2. 提取 JS 引用的面板 ID（覆盖 getElementById / on() / bindToggle）
 const jsRefs = new Set();
@@ -24,7 +34,7 @@ const missing = [...jsRefs].filter((id) => !htmlIds.has(id));
 // 反向：HTML 有但 JS 不引用（仅提示，可能是有意为之）
 const unused = [...htmlIds].filter((id) => !jsRefs.has(id));
 
-console.log('面板 HTML 提供的 ID:', htmlIds.size, '个');
+console.log('HTML 模板提供的 ID:', htmlIds.size, '个（' + htmlBlocks.map((b) => b.name).join(' + ') + '）');
 console.log('JS 引用的面板 ID:', jsRefs.size, '个');
 
 let fail = false;

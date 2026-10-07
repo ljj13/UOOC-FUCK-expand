@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "UOOC 助手 Pro（整合版）",
-  "version": "3.1.4",
+  "version": "3.2.0",
   "description": "UOOC 优课联盟整合助手：全自动挂机引擎 + 视频助手（倍速/静音/播放/连播）+ 弹窗小题秒答（嗅探/LLM/穷举三层）+ AI(LLM)考试答题",
   "permissions": ["storage", "scripting"],
   "host_permissions": [

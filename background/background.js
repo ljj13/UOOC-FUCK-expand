@@ -106,10 +106,25 @@ function uoocPageProbe() {
           c.threads && (typeof c.replay === 'function' || typeof c.getList === 'function' || typeof c.handleRelease === 'function'));
         if (s) {
           const t = s.threads || {};
+          // 正文取 scope 数据与渲染 DOM 中较完整者：
+          // 部分帖子的 scope.content 为空或只剩链接文字，DOM 可见文本可以补齐
+          const scopeText = strip(t.content || '', 2000);
+          const domText = String(n.innerText || '')
+            .replace(/[ \t]+/g, ' ').replace(/\n{3,}/g, '\n\n').trim().slice(0, 2000);
+          // 已有回复：真正列表在 scope.postData（当前页最多 20 条），
+          // threads.replies 只是数字总数。取前 6 条作生成上下文（避免观点重复）。
+          let replies = [];
+          if (Array.isArray(s.postData)) {
+            replies = s.postData.slice(0, 6)
+              .map((r) => strip((r && r.content) || '', 200))
+              .filter(Boolean);
+          }
           out.detail = {
             tid: String(t.tid || t.id || ''),
+            courseId: String(t.course_id || ''),
             title: strip(t.subject || t.title || '', 150),
-            content: strip(t.content || (n.innerText || ''), 1500)
+            content: scopeText.length >= domText.length ? scopeText : domText,
+            replies
           };
           break;
         }
@@ -121,6 +136,9 @@ function uoocPageProbe() {
 
 // 填充编辑器并经 courseService.discReply 发帖
 function uoocPageSubmitReply(cid, tid, content) {
+  // cid 为空时站点接口必然失败（实测 /Home/Threads/reply 带空 cid 返回错误对象）。
+  // 直接拒绝：让 content 侧计一次失败并跳过本贴，避免无意义的反复提交。
+  if (!String(cid || '').trim()) return { __err: '缺少课程 cid，放弃本次发帖' };
   function climb(scope, pred) {
     let cur = scope;
     for (let i = 0; cur && i < 12; i++) {
