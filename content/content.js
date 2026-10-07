@@ -407,6 +407,20 @@ if (window.self === window.top) { // 防 iframe 多次注入，只在顶层运�
     return { tied: false, mask: best.rep.mask, letters: best.rep.letters, votes: best.count, total: valid.length };
   }
 
+  // 🚦 单选组一次只能点一个 —— 多 bit 掩码对 radio 根本点不出来，这类组合纯属浪费。
+  function maskAchievable(inputs, mask) {
+    const seen = new Set();
+    for (let j = 0; j < inputs.length; j++) {
+      if (!(mask & (1 << j))) continue;
+      const inp = inputs[j];
+      if (inp.type !== 'radio') continue;
+      const key = inp.name || `__r${j}`;
+      if (seen.has(key)) return false;
+      seen.add(key);
+    }
+    return true;
+  }
+
   // 🧭 当前小节的指纹：用来区分"题被答掉了"和"页面整个跳走了"
   function sectionKey() {
     const n = document.querySelector('.oneline.active, .basic.active');
@@ -442,100 +456,110 @@ if (window.self === window.top) { // 防 iframe 多次注入，只在顶层运�
     unlockPage();
     if (layer) {
       layer.style.display = 'none';
+      layer.dataset.triedMask = '0';
       layer.dataset.ghostSince = '';
-      layer.dataset.manualHint = '';
     }
     isPopupAlarmed = false;
     resumeVideo();
   }
 
-  // 🎯 主入口：嗅探 -> LLM 采样投票，交一次卷后收尾。
-  // 刻意不做选项穷举：每次错误作答都会计入成绩，穷举会显著拉低分数。
-  // 两层都没拿到可靠答案时，保留弹窗提醒人工作答。
+  // 🎯 主入口（弹窗小题）：嗅探 → LLM 采样投票 → 穷举兜底。
+  // 弹窗小题分值低、站点即时判分，穷举的代价可接受（v2.2 恢复，仅限弹窗；
+  // 考试/章节测验不走盲穷举，见闯关流水线的「只爆破错题」）。
   async function handlePopupQuiz(layer) {
     if (!layer || layer.dataset.busy === '1') return;
 
     const inputs = quizInputs(layer);
     if (!inputs.length || !quizSubmitBtn(layer)) return; // 还没渲染完，或只是空壳
 
+    const tried = Number(layer.dataset.triedMask || 0);
     const qSig = (layer.querySelector('.ti-q-c')?.innerText || '').trim();
     const sec0 = sectionKey();
+    const total = (1 << inputs.length) - 1;
+    const MAX_TRY = 24;
 
-    let candidate = null;
+    // 候选顺序：嗅探命中只交它自己（站点自己的答案，多交反而可能覆盖）；
+    // 否则 LLM 投票答案打头，后面跟穷举组合兜底。
+    const order = [];
+    let firstLabel = null;
     const sniff = sniffMask(layer, inputs);
     if (sniff) {
-      candidate = { mask: sniff.mask, letters: sniff.letters, source: '内存嗅探' };
+      order.push(sniff.mask);
+      firstLabel = `🎯 内存嗅探命中 ${sniff.letters}`;
     } else {
       const c = Store.get('llmConfig', null);
-      const llmReady = Store.get('llmEnabled', false) && c && c.baseUrl && c.apiKey;
-      if (!llmReady) {
-        log('⚠️ 嗅探未命中且 LLM 未启用，不作答（勾选 LLM答题并配置后可自动作答，否则请手动作答）');
-        manualAlarm(layer);
-        return;
+      if (Store.get('llmEnabled', false) && c && c.baseUrl && c.apiKey) {
+        log(`⚠️ 嗅探未命中（${layer.dataset.sniffFail || '未知原因'}），LLM 采样投票中...`);
+        const llm = await llmPopupMaskVote(layer, inputs).catch(() => null);
+        if (llm) {
+          order.push(llm.mask);
+          firstLabel = `🗳️ LLM投票 ${llm.letters}`;
+        }
       }
-      log(`⚠️ 嗅探未命中（${layer.dataset.sniffFail || '未知原因'}），LLM 采样投票中...`);
-      const llm = await llmPopupMaskVote(layer, inputs).catch(() => null);
-      if (llm) {
-        candidate = { mask: llm.mask, letters: llm.letters, source: 'LLM投票' };
-      } else {
-        log('⚠️ LLM 未能给出一致答案，不提交（避免错误作答拉低分数），请手动作答');
-        manualAlarm(layer);
-        return;
+      // 穷举兜底：跳过已试过的组合和单选点不出来的多 bit 组合
+      for (let m = 1; m <= total && order.length < MAX_TRY + 1; m++) {
+        if ((tried & m) || !maskAchievable(inputs, m) || order.includes(m)) continue;
+        order.push(m);
       }
     }
+    if (!order.length) return;
 
     layer.dataset.busy = '1';
     let accepted = false;
     try {
-      if (!popupVisible(document.querySelector(QUIZ_SEL))) {
-        accepted = true; // 等待采样期间弹窗已消失（被人答掉/页面跳转），无需处理
-      } else {
+      for (const mask of order) {
+        if (!popupVisible(document.querySelector(QUIZ_SEL))) break;
         const cur = quizInputs(layer);
-        const btn = quizSubmitBtn(layer);
-        // ⚠️ 题面/结构在采样期间变了就放弃这一轮，交给主循环重来；
-        // 每轮重新取按钮：站点可能在提交后重新渲染整个题目块，旧引用会变成废节点
-        if (cur.length === inputs.length && btn
-            && (layer.querySelector('.ti-q-c')?.innerText || '').trim() === qSig) {
-          log(`🎯 ${candidate.source}命中 ${candidate.letters}，提交…`);
-          const before = layerText(layer);
-          applyMask(cur, candidate.mask);
-          await wait(200);
-          clickHard(btn);
-          await wait(1200);
+        if (cur.length !== inputs.length) break;                      // 结构变了，交给主循环重来
+        if ((layer.querySelector('.ti-q-c')?.innerText || '').trim() !== qSig) break; // 换题了
 
-          if (!popupVisible(document.querySelector(QUIZ_SEL))) {
-            // 弹窗真没了也可能是"页面整体跳走了"，那不是我们答对的
-            if (sectionKey() !== sec0) log('↩️ 弹窗消失但页面已跳转，不计为作答成功');
-            else { log('✅ 弹窗已关闭，作答成功'); accepted = true; }
-          } else {
-            // 🎯 题目块内容变了 = 站点已受理这次交卷（优课的弹窗答完不消失，只贴结果）
-            const after = layerText(layer);
-            if (after !== before) {
-              log(`🎯 交卷已受理${verdict(after)}`);
-              accepted = true;
-            }
-          }
+        // ⚠️ 每轮都重新取按钮：站点可能在提交后重新渲染整个题目块，旧引用会变成废节点
+        const btn = quizSubmitBtn(layer);
+        if (!btn) break;
+
+        if (firstLabel) {
+          log(firstLabel + '，提交…');
+          firstLabel = null;
+        } else {
+          log(`🔨 穷举组合 ${mask.toString(2).padStart(inputs.length, '0')}`);
         }
+
+        const before = layerText(layer);
+        applyMask(cur, mask);
+        layer.dataset.triedMask = String(Number(layer.dataset.triedMask || 0) | mask);
+        await wait(200);
+        clickHard(btn);
+        await wait(1200);
+
+        if (!popupVisible(document.querySelector(QUIZ_SEL))) {
+          // 弹窗真没了也可能是"页面整体跳走了"，那不是我们答对的
+          if (sectionKey() !== sec0) log('↩️ 弹窗消失但页面已跳转，不计为作答成功');
+          else log('✅ 弹窗已关闭，作答成功');
+          accepted = true;
+          break;
+        }
+
+        // 🎯 题目块内容变了 = 站点已受理这次交卷
+        const after = layerText(layer);
+        if (after !== before) {
+          log(`🎯 交卷已受理${verdict(after)}`);
+          accepted = true;
+          break;
+        }
+        // 内容没变 = 这次点击没被受理，换下一个候选再试
       }
 
       if (!accepted) {
-        log('⚠️ 交卷未被受理，保留弹窗请人工检查（诊断如下）');
+        log('⚠️ 候选穷尽仍未被受理，收尾并提醒人工（诊断如下）');
         quizDiagnose(layer);
+        speak('弹窗小题请手动处理');
       }
     } catch (e) {
       console.error(e);
     } finally {
-      // 只在已受理时收尾；未受理保留弹层，避免把没答的题藏起来
-      if (accepted) finishPopupQuiz(layer);
+      finishPopupQuiz(layer); // 🧹 弹窗小题无论结果都收尾，不阻塞引擎
       layer.dataset.busy = '0';
     }
-  }
-
-  // 🙋 无可靠答案来源时的人工接管提醒（每个弹窗轮次只提醒一次）
-  function manualAlarm(layer) {
-    if (layer.dataset.manualHint === '1') return;
-    layer.dataset.manualHint = '1';
-    speak('弹窗小题请手动作答');
   }
 
   // ==================== 7. 章节导航（连播） ====================
@@ -772,7 +796,8 @@ if (window.self === window.top) { // 防 iframe 多次注入，只在顶层运�
         type: questionType,
         question: questionText,
         options: options,
-        isRadio: isRadio
+        isRadio: isRadio,
+        el: container
       });
     });
     console.log('[UOOC助手-AI] 提取到', questions.length, '道题目');
@@ -831,11 +856,24 @@ if (window.self === window.top) { // 防 iframe 多次注入，只在顶层运�
 
     log('📡 正在调用 LLM（3 路采样投票）...');
     const prompt = buildPrompt(questions);
+    const answers = await llmVoteAnswers(prompt, questions.length, 0.3, '整卷');
+    if (answers === null) {
+      alert('AI答题失败：3 路采样全部失败。\n请检查API配置是否正确（设置页可测试连接）。');
+      return null;
+    }
+    const agreed = answers.filter(Boolean).length;
+    log(`🗳️ 投票完成：${agreed}/${questions.length} 题达成多数一致`);
+    return answers;
+  }
+
+  // 🗳️ 通用采样投票：并行问 3 次取多数，票数并列补问 2 轮，仍并列取票数最高候选（先到者胜）。
+  // 返回长度为 count 的答案数组（按题号-1 对齐），全部采样失败返回 null。
+  async function llmVoteAnswers(prompt, count, temperature = 0.3, tag = '') {
     const ask = async () => {
       const res = await llmChat([
         { role: 'system', content: '你是一个专业的答题助手，请严格按照要求的格式返回答案。' },
         { role: 'user', content: prompt }
-      ], 0.3);
+      ], temperature);
       if (!res || !res.ok) {
         console.log('[UOOC助手-AI] 采样失败:', res && (res.error || res.status));
         return null;
@@ -844,31 +882,24 @@ if (window.self === window.top) { // 防 iframe 多次注入，只在顶层运�
         res.data.choices[0].message && res.data.choices[0].message.content) || '';
     };
 
+    const shim = { length: count }; // parseAnswers 只用到 length
     let parsed = (await Promise.all([ask(), ask(), ask()]))
-      .map((t) => (t ? parseAnswers(t, questions) : null));
-    if (parsed.every((p) => !p)) {
-      alert('AI答题失败：3 路采样全部失败。\n请检查API配置是否正确（设置页可测试连接）。');
-      return null;
-    }
+      .map((t) => (t ? parseAnswers(t, shim) : null));
+    if (parsed.every((p) => !p)) return null;
 
-    let votes = voteExamAnswers(parsed, questions);
+    let votes = voteExamAnswers(parsed, count);
     if (votes.some((v) => v && v.tied)) {
-      log('🗳️ 部分题目票数并列，补问 2 轮后按多数决...');
+      log(`🗳️ ${tag}部分题目票数并列，补问 2 轮后按多数决...`);
       parsed = parsed.concat((await Promise.all([ask(), ask()]))
-        .map((t) => (t ? parseAnswers(t, questions) : null)));
-      votes = voteExamAnswers(parsed, questions);
+        .map((t) => (t ? parseAnswers(t, shim) : null)));
+      votes = voteExamAnswers(parsed, count);
     }
-
-    // 仍并列的题取票数最高的候选（先到者胜），保证不留空卷
-    const answers = votes.map((v) => (v ? v.answer : null));
-    const agreed = answers.filter(Boolean).length;
-    log(`🗳️ 投票完成：${agreed}/${questions.length} 题达成多数一致`);
-    return answers;
+    return votes.map((v) => (v ? v.answer : null));
   }
 
   // 对每道题的多次作答结果投票。返回每题 {answer, tied}；无人作答的题为 null。
-  function voteExamAnswers(parsedArr, questions) {
-    return questions.map((q, qi) => {
+  function voteExamAnswers(parsedArr, count) {
+    return Array.from({ length: count }, (_, qi) => {
       const groups = new Map();
       for (const p of parsedArr) {
         const ans = p && p[qi];
@@ -920,6 +951,12 @@ if (window.self === window.top) { // 防 iframe 多次注入，只在顶层运�
       return;
     }
 
+    // 学习页内的章节测验（闯关）且开启闯关模式 → 完整流水线：自动交卷→重做错题→只爆破错题。
+    // /exam/ 考试页永不自动交卷、不穷举，只填答案留人工提交。
+    if (!isExamPage() && Store.get('gateOn', true)) {
+      return runGatePipeline();
+    }
+
     const questions = extractQuestions();
     if (questions.length === 0) {
       alert('未找到题目（.queContainer）。\n请确认当前页面是测评/考试页面，且试卷已加载完成。');
@@ -935,6 +972,307 @@ if (window.self === window.top) { // 防 iframe 多次注入，只在顶层运�
     setTimeout(() => {
       alert(`✅ AI答题完成！\n\n已自动填入 ${filledCount} 个答案。\n\n请仔细检查答案后，手动点击"提交试卷"按钮。`);
     }, 500);
+  }
+
+  // ==================== 9.5 闯关流水线（学习页章节测验）：交卷 → 重做错题 → 只爆破错题 ====================
+  // 思路取自 fuckuooc 的闯关模式三级策略：
+  //   LLM 投票作答 → 交卷 → 读每题判分 → 只重做错题（换提示+升温重采样）→ 仍不过 →
+  //   锁定已对的题，只对错题穷举候选（每次提交后按判分反馈锁定，对的题永不动）。
+  // 已对的题保持原答案，因此爆破不会把分数越刷越低——只会把 0 分题往对了改。
+
+  // 在试卷文档里找交卷按钮（排除"保存试卷"草稿按钮）
+  function findSubmitBtn() {
+    const d = getQuizDocument() || document;
+    const nodes = d.querySelectorAll('button, a.btn, input[type="button"], .exam-btn');
+    for (const el of nodes) {
+      const t = (el.innerText || el.value || '').trim();
+      if (!t || el.offsetHeight <= 0) continue;
+      if (t.includes('保存')) continue;
+      if (/提交|交卷/.test(t)) return el;
+    }
+    return null;
+  }
+
+  // layui 确认框（"确定提交吗"之类）出现时点它的主按钮
+  async function handleConfirmDialog() {
+    const dlg = Array.from(document.querySelectorAll('.layui-layer')).find((el) => {
+      if (el.classList.contains('layui-layer-shade') || el.offsetHeight <= 10) return false;
+      if (el.id === 'quizLayer' || el.querySelector('.ti-q-c')) return false;
+      return !!el.querySelector('.layui-layer-btn');
+    });
+    if (!dlg) return false;
+    const btn = dlg.querySelector('.layui-layer-btn .layui-layer-btn0')
+      || dlg.querySelector('.layui-layer-btn a, .layui-layer-btn button');
+    if (btn) { btn.click(); return true; }
+    return false;
+  }
+
+  // 交卷一次：点提交 → 处理确认框 → 检查智能验证。返回 'ok' | 'verify' | 'nosubmit'
+  async function submitPaper() {
+    const btn = findSubmitBtn();
+    if (!btn) return 'nosubmit';
+    clickHard(btn);
+    await wait(900);
+    if (await handleConfirmDialog()) await wait(1200);
+    if (verifyLayerVisible()) {
+      log('🛡️ 交卷触发智能验证，请手动完成验证后重试');
+      speak('请完成验证');
+      return 'verify';
+    }
+    await wait(800);
+    return 'ok';
+  }
+
+  // 读单题判分：红标=错；得分==满分=对；文本判对错；读不到=未知(null)
+  function readQuestionResult(container) {
+    const scores = container.querySelector('.scores');
+    if (!scores) return null;
+    const txt = scores.innerText || '';
+    if (scores.querySelector('.color-red')) return false;
+    if (/回答正确|答案正确|答对了|答对|正确/.test(txt)) return true;
+    if (/回答错误|答案错误|答错了|答错|不正确|错误/.test(txt)) return false;
+    const m = txt.match(/\d+\.?\d+/g);
+    if (m && m.length >= 2) return parseFloat(m[0]) === parseFloat(m[1]);
+    return null;
+  }
+
+  // 评估整卷：每题对错 + 站点失败弹窗
+  function assessPaper() {
+    const fresh = extractQuestions();
+    let right = 0, wrong = 0, unknown = 0;
+    const wrongQs = [];
+    for (const q of fresh) {
+      const r = readQuestionResult(q.el);
+      if (r === true) right++;
+      else if (r === false) { wrong++; wrongQs.push(q); }
+      else unknown++;
+    }
+    const dlgText = Array.from(document.querySelectorAll('.layui-layer'))
+      .filter((el) => !el.classList.contains('layui-layer-shade') && el.offsetHeight > 10)
+      .map((el) => el.innerText || '').join(' ');
+    const failDialog = /请重新提交|重新提交测验|未通过|不及格|回答错误/.test(dlgText);
+    return {
+      pass: right > 0 && wrong === 0 && unknown === 0 && !failDialog,
+      failDialog, wrongQs, right, wrong, unknown, total: fresh.length
+    };
+  }
+
+  // DOM 可能被站点重渲染，按题号重新收集题目
+  function collectQuestionByIndex(index) {
+    return extractQuestions().find((q) => q.index === index) || null;
+  }
+
+  // 清掉一道多选题的已勾选项（radio 由下一次选择自然顶掉，无需清）
+  function clearQuestionSelections(q) {
+    q.options.forEach((opt) => {
+      const inp = opt.input;
+      if (inp && inp.checked && inp.type === 'checkbox') {
+        (inp.closest('label') || inp.parentElement || inp).click();
+        inp.dispatchEvent(new Event('input', { bubbles: true }));
+        inp.dispatchEvent(new Event('change', { bubbles: true }));
+      }
+    });
+  }
+
+  function buildRetryPrompt(wrongQs, prevByIndex) {
+    let prompt = '下面这些选择题之前的答案被判定为错误，请重新作答，给出的答案不要与之前的相同。\n';
+    prompt += '每题直接给出答案选项字母，多选题用逗号分隔，不要解释。\n\n';
+    wrongQs.forEach((q) => {
+      const prev = (prevByIndex[q.index] || []).join('、') || '未知';
+      prompt += `第${q.index}题 [${q.type}]（之前的错误答案：${prev}）\n`;
+      prompt += `题目：${q.question}\n`;
+      q.options.forEach((o) => { prompt += `${o.label}. ${o.text}\n`; });
+      prompt += '\n';
+    });
+    prompt += '请按格式返回：\n1. A\n2. B,C\n...';
+    return prompt;
+  }
+
+  // 重做错题：换提示 + 提高温度重采样，只改错题，已对的题不动
+  async function redoWrongQuestions(wrongQs, prevByIndex) {
+    const maxIndex = Math.max(...wrongQs.map((q) => q.index));
+    const prompt = buildRetryPrompt(wrongQs, prevByIndex);
+    const answers = await llmVoteAnswers(prompt, maxIndex, 0.5, '重做');
+    if (!answers) {
+      log('❌ LLM 重做采样全部失败，请检查 API 配置');
+      return false;
+    }
+    let applied = 0;
+    for (const q of wrongQs) {
+      const ans = answers[q.index - 1];
+      if (!ans || !ans.length) continue;
+      const fresh = collectQuestionByIndex(q.index);
+      if (!fresh) continue;
+      clearQuestionSelections(fresh);
+      fillAnswers([fresh], [ans]);
+      applied++;
+      log(`🔁 第${q.index}题改答 ${ans.join(',')}`);
+    }
+    return applied > 0;
+  }
+
+  // 多选题候选组合顺序：子集大小 2→3→…→n，最后才是单元素（多选答案通常≥2个）
+  function multiCombos(n) {
+    const out = [];
+    for (let size = 2; size <= n; size++) {
+      const rec = (start, cur) => {
+        if (cur.length === size) { out.push(cur.slice()); return; }
+        for (let i = start; i < n; i++) { cur.push(i); rec(i + 1, cur); cur.pop(); }
+      };
+      rec(0, []);
+    }
+    for (let i = 0; i < n; i++) out.push([i]);
+    return out;
+  }
+
+  function lettersToIndices(q, letters) {
+    const idx = [];
+    (letters || []).forEach((L) => {
+      let opt = q.options.find((o) => o.value === L)
+        || q.options.find((o) => (o.label || '').toUpperCase() === String(L).toUpperCase());
+      if (!opt) opt = q.options[String(L).charCodeAt(0) - 65];
+      const i = opt ? q.options.indexOf(opt) : -1;
+      if (i >= 0) idx.push(i);
+    });
+    return idx;
+  }
+
+  function maskFromIndices(indices) {
+    let mask = 0;
+    indices.forEach((i) => { mask |= (1 << i); });
+    return mask;
+  }
+
+  // 🔨 只爆破错题：对的题锁死不动，逐道错题穷举候选，每次提交后按判分锁定正确组合。
+  // 返回整卷是否全部答对。
+  async function bruteWrongQuestions(initialWrong) {
+    const MAX_SUBMITS = 60;
+    let submits = 0;
+    const wrong = initialWrong.slice();
+
+    while (wrong.length && submits < MAX_SUBMITS) {
+      const q = wrong.shift();
+      let solved = false;
+      const fresh0 = collectQuestionByIndex(q.index);
+      if (!fresh0) continue;
+      const n = fresh0.options.length;
+      const combos = fresh0.isRadio
+        ? Array.from({ length: n }, (_, i) => [i])
+        : multiCombos(n);
+      const prevIdx = lettersToIndices(q, q.prevAnswer);
+
+      for (const combo of combos) {
+        if (submits >= MAX_SUBMITS) { log('⛔ 爆破提交次数达到上限，停止'); break; }
+        if (verifyLayerVisible()) {
+          log('🛡️ 触发智能验证，停止爆破，请手动处理');
+          speak('请完成验证');
+          return false;
+        }
+        // 跳过已判错的组合
+        if (combo.length === prevIdx.length && combo.every((v, i) => v === prevIdx[i])) continue;
+
+        const cur = collectQuestionByIndex(q.index);
+        if (!cur) break;
+        const curInputs = cur.options.map((o) => o.input);
+        applyMask(curInputs, maskFromIndices(combo));
+        await wait(250);
+
+        const how = await submitPaper();
+        if (how === 'nosubmit') { log('❌ 找不到交卷按钮，停止爆破'); return false; }
+        if (how === 'verify') return false;
+        submits++;
+        await wait(600);
+
+        const after = collectQuestionByIndex(q.index);
+        const r = after ? readQuestionResult(after.el) : null;
+        if (r === true) {
+          const ls = combo.map((i) => (cur.options[i] ? (cur.options[i].label || String.fromCharCode(65 + i)) : String.fromCharCode(65 + i))).join(',');
+          log(`🔨 第${q.index}题爆破成功（${ls}），已锁定`);
+          solved = true;
+          const st = assessPaper();
+          if (st.pass) return true;
+          break;
+        }
+        if (r === null) {
+          log(`⚠️ 第${q.index}题读不到判分反馈，无法继续爆破（可能该卷不显示单题得分），请人工处理`);
+          solved = null;
+          break;
+        }
+        // r === false → 换下一个组合
+      }
+      if (solved === false) log(`❌ 第${q.index}题穷尽候选仍未答对，跳过`);
+    }
+
+    const fin = assessPaper();
+    log(`🧮 爆破结束：共提交 ${submits} 次，当前对 ${fin.right} / 错 ${fin.wrong} / 未知 ${fin.unknown}`);
+    return fin.pass;
+  }
+
+  // 🚧 主流程：LLM投票作答 → 自动交卷 → 未通过则 LLM 只重做错题 → 仍不过 → 只爆破错题
+  async function runGatePipeline() {
+    const questions = extractQuestions();
+    if (!questions.length) {
+      alert('未找到题目（.queContainer）。\n请确认当前是章节测验页面，且试卷已加载完成。');
+      return;
+    }
+
+    log(`🚧 闯关模式启动：共 ${questions.length} 题，LLM 投票作答中...`);
+    const firstAnswers = await callLLMExam(questions);
+    if (!firstAnswers) return;
+    fillAnswers(questions, firstAnswers);
+    const prevByIndex = {};
+    questions.forEach((q, i) => { prevByIndex[q.index] = firstAnswers[i] || []; });
+
+    // 第一次交卷
+    log('📮 自动交卷...');
+    let how = await submitPaper();
+    if (how === 'nosubmit') {
+      log('❌ 未找到交卷按钮，请手动提交；未通过时可再点「开始答题」进入重做/爆破流程');
+      setTimeout(() => alert('未找到"提交试卷"按钮，请手动提交。'), 400);
+      return;
+    }
+    if (how === 'verify') return;
+
+    for (let round = 1; round <= 2; round++) {
+      await wait(1200);
+      const st = assessPaper();
+
+      if (st.pass) {
+        log('🎉 闯关成功（LLM 路径）！');
+        speak('闯关成功');
+        return;
+      }
+      if (!st.wrongQs.length) {
+        if (st.unknown === st.total && !st.failDialog) {
+          log('⚠️ 读不到判分反馈，可能未真正交卷（或该卷不显示单题得分），请人工确认');
+          return;
+        }
+        log('🎉 闯关成功（LLM 路径）！');
+        speak('闯关成功');
+        return;
+      }
+      log(`📊 提交结果：对 ${st.right} / 错 ${st.wrong} / 未知 ${st.unknown}${st.failDialog ? '（站点提示未通过）' : ''}`);
+
+      if (round === 1) {
+        log(`🔁 重做 ${st.wrongQs.length} 道错题（换提示 + 升温重采样，已对的 ${st.right} 题不动）...`);
+        st.wrongQs.forEach((wq) => { wq.prevAnswer = prevByIndex[wq.index] || []; });
+        if (!(await redoWrongQuestions(st.wrongQs, prevByIndex))) return;
+        how = await submitPaper();
+        if (how !== 'ok') return;
+      } else {
+        // 两轮 LLM 后仍未通过 → 只爆破错题
+        log(`🔨 只爆破错题：锁定已对的 ${st.right} 题，仅对 ${st.wrongQs.length} 道错题穷举（每次提交按判分锁定）`);
+        st.wrongQs.forEach((wq) => { wq.prevAnswer = prevByIndex[wq.index] || []; });
+        const pass = await bruteWrongQuestions(st.wrongQs);
+        if (pass) {
+          log('🎉 闯关成功（爆破路径）！');
+          speak('闯关成功');
+        } else {
+          speak('闯关结束，请人工复核');
+        }
+        return;
+      }
+    }
   }
 
   // ==================== 10. 复制题目答案（已提交测验的回顾页） ====================
@@ -1061,12 +1399,13 @@ if (window.self === window.top) { // 防 iframe 多次注入，只在顶层运�
               <div class="uooc-row">
                 <label title="自动播放并拦截站点暂停（空格键切换）"><input type="checkbox" id="uooc-play-on">播放</label>
                 <label title="播完自动跳下一节"><input type="checkbox" id="uooc-continue-on">连播</label>
-                <label title="视频弹窗小题自动作答（内存嗅探 → LLM采样投票；不做穷举，答不了会提醒人工）"><input type="checkbox" id="uooc-popup-on">弹窗秒答</label>
+                <label title="视频弹窗小题自动作答（内存嗅探 → LLM采样投票 → 穷举兜底）"><input type="checkbox" id="uooc-popup-on">弹窗秒答</label>
               </div>
             </div>
             <div class="uooc-row" id="uooc-llm-row">
               <span id="uooc-llm-set" title="配置AI答题参数">⚙️</span>
               <label><input type="checkbox" id="uooc-llm-on">LLM答题</label>
+              <label title="学习页章节测验自动交卷：重做错题 + 只爆破错题（/exam/考试页不受影响，永不自动交卷）"><input type="checkbox" id="uooc-gate-on">闯关</label>
               <button id="uooc-answer-btn">🤖 开始答题</button>
             </div>
             <div class="uooc-row">
@@ -1124,6 +1463,7 @@ if (window.self === window.top) { // 防 iframe 多次注入，只在顶层运�
     });
     bindToggle('uooc-continue-on', 'continueOn');
     bindToggle('uooc-popup-on', 'popupSolveOn');
+    bindToggle('uooc-gate-on', 'gateOn');
 
     document.getElementById('uooc-rate-value').addEventListener('change', (e) => {
       Store.set({ rateValue: Number(e.target.value) || 2 });
@@ -1215,6 +1555,7 @@ if (window.self === window.top) { // 防 iframe 多次注入，只在顶层运�
       'uooc-play-on': ['playOn', true],
       'uooc-continue-on': ['continueOn', true],
       'uooc-popup-on': ['popupSolveOn', true],
+      'uooc-gate-on': ['gateOn', true],
       'uooc-llm-on': ['llmEnabled', false]
     };
     for (const [id, [key, dft]] of Object.entries(map)) {
@@ -1333,11 +1674,11 @@ if (window.self === window.top) { // 防 iframe 多次注入，只在顶层运�
 
         isPopActive = popupVisible(popBox) && popBox.dataset.solved !== 'true';
 
-        // 🔁 弹窗由不可见 -> 可见 = 新一轮，复位状态允许重新作答
+        // 🔁 弹窗由不可见 -> 可见 = 新一轮，清空上一轮的穷举记录，允许重新作答
         if (isPopActive && !wasPopActive) {
+          popBox.dataset.triedMask = '0';
           popBox.dataset.busy = '0';
           popBox.dataset.alarmSince = '';
-          popBox.dataset.manualHint = '';
           isPopupAlarmed = false;
         }
 

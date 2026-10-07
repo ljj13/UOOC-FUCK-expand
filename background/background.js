@@ -10,6 +10,7 @@ chrome.runtime.onInstalled.addListener(async () => {
     playOn: true,
     continueOn: true,
     popupSolveOn: true,
+    gateOn: true,
     llmEnabled: false,
     engineRunning: false,
     llmConfig: null

@@ -8,7 +8,8 @@ const TOGGLES = {
   'mute-on': 'muteOn',
   'play-on': 'playOn',
   'continue-on': 'continueOn',
-  'popup-on': 'popupSolveOn'
+  'popup-on': 'popupSolveOn',
+  'gate-on': 'gateOn'
 };
 
 async function load() {
